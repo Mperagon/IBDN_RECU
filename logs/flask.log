@@ -1,0 +1,31 @@
+ * Serving Flask app 'predict_flask'
+ * Debug mode: on
+[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5001
+ * Running on http://172.18.136.231:5001
+[33mPress CTRL+C to quit[0m
+127.0.0.1 - - [04/Jun/2026 11:38:40] "GET /socket.io/?EIO=4&transport=polling&t=PwH_yN- HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 11:38:40] "POST /socket.io/?EIO=4&transport=polling&t=PwH_yTB&sid=1rzCapDlnEx2u4ouAAAA HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 11:38:40] "GET /socket.io/?EIO=4&transport=polling&t=PwH_yTC&sid=1rzCapDlnEx2u4ouAAAA HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 11:38:40] "GET /socket.io/?EIO=4&transport=polling&t=PwH_yY2&sid=1rzCapDlnEx2u4ouAAAA HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 11:38:41] "GET /socket.io/?EIO=4&transport=polling&t=PwH_ydt HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 11:38:41] "POST /socket.io/?EIO=4&transport=polling&t=PwH_yj7&sid=jWeGKWyhQlgq78VYAAAC HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 11:38:41] "GET /socket.io/?EIO=4&transport=polling&t=PwH_yjB&sid=jWeGKWyhQlgq78VYAAAC HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 11:38:41] "GET /socket.io/?EIO=4&transport=polling&t=PwH_yo8&sid=jWeGKWyhQlgq78VYAAAC HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 11:38:54] "GET /flights/delays/predict_kafka HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 11:38:54] "POST /flights/delays/predict/classify_realtime HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 11:38:56] "GET /flights/delays/predict/classify_realtime/response/20ae77f7-5afe-4b19-ae4a-f52b808a59d2 HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 11:39:38] "GET /socket.io/?EIO=4&transport=websocket&sid=1rzCapDlnEx2u4ouAAAA HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 11:39:38] "GET /flights/delays/predict_kafka HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 11:39:39] "[36mGET /static/bootstrap.min.css HTTP/1.1[0m" 304 -
+127.0.0.1 - - [04/Jun/2026 11:39:39] "[36mGET /static/jquery-1.12.2.min.js HTTP/1.1[0m" 304 -
+127.0.0.1 - - [04/Jun/2026 11:39:39] "[36mGET /static/bootstrap.min.js HTTP/1.1[0m" 304 -
+127.0.0.1 - - [04/Jun/2026 11:39:39] "[36mGET /static/d3.v3.min.js HTTP/1.1[0m" 304 -
+127.0.0.1 - - [04/Jun/2026 11:39:39] "[36mGET /static/flight_delay_predict_ws.js HTTP/1.1[0m" 304 -
+127.0.0.1 - - [04/Jun/2026 11:39:39] "[36mGET /static/bootstrap-theme.min.css HTTP/1.1[0m" 304 -
+127.0.0.1 - - [04/Jun/2026 11:39:39] "GET /socket.io/?EIO=4&transport=polling&t=PwI0AqG HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 11:39:39] "POST /socket.io/?EIO=4&transport=polling&t=PwI0AvI&sid=2qrBT-WO404PmI1tAAAE HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 11:39:40] "GET /socket.io/?EIO=4&transport=polling&t=PwI0AvJ&sid=2qrBT-WO404PmI1tAAAE HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 11:39:40] "POST /flights/delays/predict/classify_realtime HTTP/1.1" 200 -
+127.0.0.1 - - [04/Jun/2026 11:45:03] "POST /flights/delays/predict/classify_realtime HTTP/1.1" 200 -

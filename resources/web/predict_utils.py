@@ -1,6 +1,7 @@
 import sys, os, re
 import pymongo
 import datetime, iso8601
+from cassandra.cluster import Cluster
 
 def process_search(results):
   """Process elasticsearch hits and return flights records"""
@@ -31,14 +32,20 @@ def strip_place(url):
     return url
   return p
 
-def get_flight_distance(client, origin, dest):
-  """Get the distance between a pair of airport codes"""
-  query = {
-    "Origin": origin,
-    "Dest": dest,
-  }
-  record = client.agile_data_science.origin_dest_distances.find_one(query)
-  return record["Distance"]
+def get_cassandra_session():
+  """Return a connected Cassandra session for the flight_data keyspace"""
+  cassandra_host = os.environ.get('CASSANDRA_HOST', '127.0.0.1')
+  cluster = Cluster([cassandra_host])
+  session = cluster.connect('flight_data')
+  return cluster, session
+
+def get_flight_distance(cassandra_session, origin, dest):
+  """Get the distance between a pair of airport codes from Cassandra"""
+  row = cassandra_session.execute(
+    "SELECT distance FROM flight_data.origin_dest_distances WHERE origin=%s AND dest=%s",
+    (origin, dest)
+  ).one()
+  return row.distance
 
 def get_regression_date_args(iso_date):
   """Given an ISO Date, return the day of year, day of month, day of week as the API expects them."""

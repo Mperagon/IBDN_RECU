@@ -1,8 +1,7 @@
 package es.upm.dit.ging.predictor
-import com.mongodb.spark._
 import org.apache.spark.ml.classification.RandomForestClassificationModel
 import org.apache.spark.ml.feature.{Bucketizer, StringIndexerModel, VectorAssembler}
-import org.apache.spark.sql.functions.{concat, from_json, lit}
+import org.apache.spark.sql.functions.{col, concat, from_json, lit, struct, to_json}
 import org.apache.spark.sql.types.{DataTypes, StructType}
 import org.apache.spark.sql.{DataFrame, SparkSession}
 
@@ -19,7 +18,7 @@ object MakePrediction {
     import spark.implicits._
 
     //Load the arrival delay bucketizer
-    val base_path= "/Users/admin/Downloads/practica_creativa"
+    val base_path = sys.env.getOrElse("PROJECT_HOME", "/app")
     val arrivalBucketizerPath = "%s/models/arrival_bucketizer_2.0.bin".format(base_path)
     print(arrivalBucketizerPath.toString())
     val arrivalBucketizer = Bucketizer.load(arrivalBucketizerPath)
@@ -44,14 +43,14 @@ object MakePrediction {
     val df = spark
       .readStream
       .format("kafka")
-      .option("kafka.bootstrap.servers", "localhost:9092")
+      .option("kafka.bootstrap.servers", "kafka:9092")
       .option("subscribe", "flight-delay-ml-request")
       .load()
     df.printSchema()
 
     val flightJsonDf = df.selectExpr("CAST(value AS STRING)")
 
-    val struct = new StructType()
+    val struct_schema = new StructType()
       .add("Origin", DataTypes.StringType)
       .add("FlightNum", DataTypes.StringType)
       .add("DayOfWeek", DataTypes.IntegerType)
@@ -70,7 +69,7 @@ object MakePrediction {
       .add("Dest_index", DataTypes.DoubleType)
       .add("Route_index", DataTypes.DoubleType)
 
-    val flightNestedDf = flightJsonDf.select(from_json($"value", struct).as("flight"))
+    val flightNestedDf = flightJsonDf.select(from_json($"value", struct_schema).as("flight"))
     flightNestedDf.printSchema()
 
     // DataFrame for Vectorizing string fields with the corresponding pipeline for that column
@@ -131,29 +130,41 @@ object MakePrediction {
       .drop("Features_vec")
 
     // Drop the features vector and prediction metadata to give the original fields
-    val finalPredictions = predictions.drop("indices").drop("values").drop("rawPrediction").drop("probability")
+    val rawPredictions = predictions.drop("indices").drop("values").drop("rawPrediction").drop("probability")
+
+    // Rename prediction column to Prediction (uppercase) for consistency with the frontend
+    val finalPredictions = rawPredictions.withColumnRenamed("prediction", "Prediction")
 
     // Inspect the output
     finalPredictions.printSchema()
 
-    // define a streaming query
-    val dataStreamWriter = finalPredictions
+    // Write predictions to Kafka topic 'flight-predictions' as JSON
+    val kafkaOutput = finalPredictions
+      .select(
+        to_json(struct(
+          col("UUID"),
+          col("Prediction"),
+          col("Origin"),
+          col("Dest"),
+          col("Carrier"),
+          col("DepDelay"),
+          col("Timestamp")
+        )).as("value")
+      )
       .writeStream
-      .format("mongodb")
-      .option("spark.mongodb.connection.uri", "mongodb://127.0.0.1:27017")
-      .option("spark.mongodb.database", "agile_data_science")
-      .option("checkpointLocation", "/tmp")
-      .option("spark.mongodb.collection", "flight_delay_ml_response")
+      .format("kafka")
+      .option("kafka.bootstrap.servers", "kafka:9092")
+      .option("topic", "flight-predictions")
+      .option("checkpointLocation", "/tmp/spark_flight_predictions_kafka")
       .outputMode("append")
+      .start()
 
-    // run the query
-    val query = dataStreamWriter.start()
-    // Console Output for predictions
-
+    // Console output for debugging
     val consoleOutput = finalPredictions.writeStream
       .outputMode("append")
       .format("console")
       .start()
+
     consoleOutput.awaitTermination()
   }
 

@@ -1,5 +1,6 @@
-import sys, os, re
+import sys, os, re, threading
 from flask import Flask, render_template, request
+from flask_socketio import SocketIO
 from pymongo import MongoClient
 from bson import json_util
 
@@ -11,11 +12,18 @@ import predict_utils
 
 # Set up Flask, Mongo and Elasticsearch
 app = Flask(__name__)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 client = MongoClient()
 
-from pyelasticsearch import ElasticSearch
-elastic = ElasticSearch(config.ELASTIC_URL)
+# Cassandra session for distance lookups and prediction storage
+cassandra_cluster, cassandra_session = predict_utils.get_cassandra_session()
+cassandra_insert = cassandra_session.prepare(
+  "INSERT INTO flight_data.flight_predictions (uuid, prediction, timestamp, origin, dest, carrier, dep_delay) VALUES (?, ?, ?, ?, ?, ?, ?)"
+)
+
+#from pyelasticsearch import ElasticSearch
+#elastic = ElasticSearch(config.ELASTIC_URL)
 
 import json
 
@@ -23,10 +31,41 @@ import json
 import iso8601
 import datetime
 
-# Setup Kafka
-from kafka import KafkaProducer
-producer = KafkaProducer(bootstrap_servers=['localhost:9092'],api_version=(0,10))
+# Setup Kafka producer
+from kafka import KafkaProducer, KafkaConsumer
+producer = KafkaProducer(bootstrap_servers=[os.environ.get('KAFKA_BROKER', 'localhost:9092')],api_version=(0,10))
 PREDICTION_TOPIC = 'flight-delay-ml-request'
+PREDICTION_RESULT_TOPIC = 'flight-predictions'
+
+# Kafka consumer thread: reads predictions, saves to Cassandra, emits WebSocket
+def start_prediction_consumer():
+  consumer = KafkaConsumer(
+    PREDICTION_RESULT_TOPIC,
+    bootstrap_servers=[os.environ.get('KAFKA_BROKER', 'localhost:9092')],
+    value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+    auto_offset_reset='latest',
+    group_id='flask-websocket-consumer'
+  )
+  for message in consumer:
+    data = message.value
+    try:
+      ts = datetime.datetime.fromisoformat(data['Timestamp'].replace('Z', '+00:00')) \
+           if isinstance(data.get('Timestamp'), str) else None
+      cassandra_session.execute(cassandra_insert, (
+        data.get('UUID'),
+        float(data.get('Prediction', 0)),
+        ts,
+        data.get('Origin'),
+        data.get('Dest'),
+        data.get('Carrier'),
+        float(data.get('DepDelay', 0))
+      ))
+    except Exception as e:
+      print(f"Cassandra insert error: {e}", file=sys.stderr)
+    socketio.emit('prediction', data, namespace='/')
+
+_consumer_thread = threading.Thread(target=start_prediction_consumer, daemon=True)
+_consumer_thread.start()
 
 import uuid
 
@@ -325,7 +364,7 @@ def regress_flight_delays():
   prediction_features['FlightNum'] = api_form_values['FlightNum']
   
   # Set the derived values
-  prediction_features['Distance'] = predict_utils.get_flight_distance(client, api_form_values['Origin'], api_form_values['Dest'])
+  prediction_features['Distance'] = predict_utils.get_flight_distance(cassandra_session, api_form_values['Origin'], api_form_values['Dest'])
   
   # Turn the date into DayOfYear, DayOfMonth, DayOfWeek
   date_features_dict = predict_utils.get_regression_date_args(api_form_values['FlightDate'])
@@ -382,7 +421,7 @@ def classify_flight_delays():
   
   # Set the derived values
   prediction_features['Distance'] = predict_utils.get_flight_distance(
-    client, api_form_values['Origin'],
+    cassandra_session, api_form_values['Origin'],
     api_form_values['Dest']
   )
   
@@ -471,7 +510,7 @@ def classify_flight_delays_realtime():
   
   # Set the derived values
   prediction_features['Distance'] = predict_utils.get_flight_distance(
-    client, api_form_values['Origin'],
+    cassandra_session, api_form_values['Origin'],
     api_form_values['Dest']
   )
   
@@ -511,20 +550,25 @@ def flight_delays_page_kafka():
 
 @app.route("/flights/delays/predict/classify_realtime/response/<unique_id>")
 def classify_flight_delays_realtime_response(unique_id):
-  """Serves predictions to polling requestors"""
-  
-  prediction = client.agile_data_science.flight_delay_ml_response.find_one(
-    {
-      "UUID": unique_id
-    }
-  )
-  
+  """Serves predictions — reads from Cassandra (fallback for non-WebSocket clients)"""
+  row = cassandra_session.execute(
+    "SELECT uuid, prediction, origin, dest, carrier, dep_delay FROM flight_data.flight_predictions WHERE uuid=%s",
+    (unique_id,)
+  ).one()
+
   response = {"status": "WAIT", "id": unique_id}
-  if prediction:
+  if row:
     response["status"] = "OK"
-    response["prediction"] = prediction
-  
-  return json_util.dumps(response)
+    response["prediction"] = {
+      "UUID": row.uuid,
+      "Prediction": row.prediction,
+      "Origin": row.origin,
+      "Dest": row.dest,
+      "Carrier": row.carrier,
+      "DepDelay": row.dep_delay,
+    }
+
+  return json.dumps(response)
 
 def shutdown_server():
   func = request.environ.get('werkzeug.server.shutdown')
@@ -538,8 +582,4 @@ def shutdown():
   return 'Server shutting down...'
 
 if __name__ == "__main__":
-    app.run(
-    debug=True,
-    host='0.0.0.0',
-    port='5001'
-  )
+  socketio.run(app, debug=True, use_reloader=False, host='0.0.0.0', port=5001, allow_unsafe_werkzeug=True)

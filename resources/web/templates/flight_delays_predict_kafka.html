@@ -4,8 +4,7 @@
   / <a href="/flights/delays/predict_kafka">Flight Delay Prediction with Kafka</a>
 
   <p class="lead" style="margin: 10px; margin-left: 0px;">
-    <!-- Airline Name and website-->
-    Predicting Flight Delays with Kafka
+    Predicting Flight Delays with Kafka + WebSockets
   </p>
 
   <!-- Generate form from search_config and request args -->
@@ -16,7 +15,7 @@
       {% else %}
         <label for="{{item['field']}}">{{item['field']}}</label>
       {% endif %}
-        <input name="{{item['field']}}" style="width: 36px; margin-right: 10px;" 
+        <input name="{{item['field']}}" style="width: 36px; margin-right: 10px;"
         {% if 'value' in item %}
           value="{{item['value']}}"
         {% endif %}
@@ -29,6 +28,8 @@
       <p>Delay: <span id="result" style="display: inline-block;"></span></p>
   </div>
 
-  <!-- Load our form processing javascript -->
-  <script src="/static/flight_delay_predict_polling.js"></script>
+  <!-- Socket.IO client -->
+  <script src="https://cdn.socket.io/4.6.0/socket.io.min.js"></script>
+  <!-- WebSocket-based prediction handler -->
+  <script src="/static/flight_delay_predict_ws.js"></script>
 {% endblock %}

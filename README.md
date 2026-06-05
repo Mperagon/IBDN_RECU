@@ -342,7 +342,139 @@ Vistit http://localhost:8080/home for the web version of Apache Airflow.
 
 ![Apache Airflow DAG success](images/airflow.jpeg)
 
+---
 
+## Arquitectura actualizada (Práctica Creativa)
+
+En esta versión del proyecto se han sustituido varias piezas del sistema original:
+
+| Componente | Original | Nuevo |
+|---|---|---|
+| Distancias entre aeropuertos | MongoDB | **Cassandra** |
+| Almacenamiento de predicciones | MongoDB | **Cassandra** |
+| Entrega de predicciones al navegador | Polling HTTP | **WebSockets (Socket.IO)** |
+| Datos de entrenamiento | Fichero JSONL local | **MinIO + Apache Iceberg** |
+
+---
+
+## Cómo arrancar el sistema (paso a paso)
+
+El sistema necesita **5 componentes** corriendo antes de poder usar la web. Abre terminales independientes para cada uno.
+
+### Terminal 1 — Cassandra (Java 11)
+
+Cassandra necesita Java 11. Usamos SDKMAN para cambiar la versión:
+
+```bash
+source ~/.sdkman/bin/sdkman-init.sh
+sdk use java 11.0.25-amzn
+cassandra -f
+```
+
+> Espera hasta ver `Starting listening for CQL clients` antes de continuar.
+
+### Terminal 2 — Kafka (Java 17)
+
+Kafka necesita Java 17:
+
+```bash
+source ~/.sdkman/bin/sdkman-init.sh
+sdk use java 17.0.14-amzn
+cd ~/kafka
+bin/kafka-server-start.sh config/kraft/server.properties
+```
+
+> Espera hasta ver `Kafka Server started` antes de continuar.
+
+### Terminal 3 — MinIO (almacenamiento de objetos)
+
+MinIO es el servidor S3 local donde guardamos los datos de entrenamiento:
+
+```bash
+~/minio server ~/minio_data --console-address ":9001"
+```
+
+> La consola web está disponible en http://127.0.0.1:9001 (usuario: `minioadmin`, contraseña: `minioadmin`)
+
+### Terminal 4 — Spark (predictor en tiempo real)
+
+Spark lee los mensajes de Kafka, aplica el modelo ML y devuelve predicciones:
+
+```bash
+source ~/.sdkman/bin/sdkman-init.sh
+sdk use java 17.0.14-amzn
+spark-submit \
+  --class es.upm.dit.ging.predictor.MakePrediction \
+  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3 \
+  /home/miguel/practica_creativa/flight_prediction/target/scala-2.12/flight_prediction_2.12-0.1.jar
+```
+
+> Espera hasta ver `Streaming query started` antes de continuar.
+
+### Terminal 5 — Flask (servidor web)
+
+Flask sirve la interfaz web y distribuye las predicciones a los navegadores vía WebSocket:
+
+```bash
+source /home/miguel/practica_creativa/env/bin/activate
+export PROJECT_HOME=/home/miguel/practica_creativa
+cd /home/miguel/practica_creativa/resources/web
+python predict_flask.py
+```
+
+> La aplicación queda disponible en http://localhost:5001/flights/delays/predict_kafka
+
+---
+
+## Data Lakehouse con MinIO e Apache Iceberg
+
+### ¿Qué es esto y por qué lo usamos?
+
+En el sistema original, los datos de entrenamiento eran un fichero `.jsonl.bz2` guardado en local. Esto funciona, pero no escala: si los datos crecen o hay varios procesos que quieren leerlos, tener un fichero local es un problema.
+
+**Apache Iceberg** es un formato de tabla pensado para datos grandes. Funciona encima de cualquier almacenamiento compatible con S3 (como MinIO) y permite que Spark lea los datos como si fuera una tabla SQL normal, con metadatos, versiones y todo lo necesario para un Data Lakehouse.
+
+**MinIO** es un servidor de almacenamiento de objetos compatible con S3 que corre en local. Los datos se guardan en "buckets" (como carpetas S3) y Spark los lee usando el protocolo `s3a://`.
+
+### Qué se hizo
+
+1. Se arrancó MinIO y se creó el bucket `flight-data`.
+2. Se convirtieron los 457.013 registros del fichero JSONL a una tabla Iceberg en formato Parquet, almacenada en `s3a://flight-data/iceberg/flight_features`.
+3. Se modificó `train_spark_mllib_model.py` para que lea los datos de entrenamiento desde Iceberg en lugar del fichero local.
+
+### Crear la tabla Iceberg (solo la primera vez)
+
+Si es la primera vez o quieres regenerar la tabla:
+
+```bash
+spark-submit \
+  --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262 \
+  resources/create_iceberg_table.py
+```
+
+Este script lee el JSONL local y escribe los datos en MinIO como tabla Iceberg. Solo necesitas ejecutarlo una vez (o si los datos de entrenamiento cambian).
+
+### Entrenar el modelo leyendo desde MinIO/Iceberg
+
+```bash
+spark-submit \
+  --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262 \
+  resources/train_spark_mllib_model.py .
+```
+
+Spark se conecta a MinIO, lee la tabla `minio_catalog.flight_features` y entrena el modelo RandomForest. Los modelos se guardan en la carpeta `models/`.
+
+### Verificar que la tabla existe y tiene datos
+
+```bash
+spark-submit \
+  --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262 \
+  verify_iceberg.py
+```
+
+Debe mostrar `457013` filas.
+
+---
 
 ## Evaluation
 
