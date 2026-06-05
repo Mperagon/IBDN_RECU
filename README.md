@@ -34,7 +34,15 @@ git clone https://github.com/Mperagon/IBDN.git practica_creativa
 cd practica_creativa
 ```
 
-### 2. Levantar todos los servicios
+### 2. Descargar los datos de entrenamiento
+
+```bash
+bash resources/download_data.sh
+```
+
+Descarga `data/simple_flight_delay_features.jsonl.bz2` y `data/origin_dest_distances.jsonl`. Puede tardar varios minutos.
+
+### 3. Levantar todos los servicios
 
 ```bash
 docker compose up -d
@@ -46,7 +54,7 @@ Espera ~2-3 minutos a que todos los contenedores estén sanos. Comprueba el esta
 docker compose ps
 ```
 
-Todos deben aparecer como `Up` o `Up (healthy)`.
+Todos deben aparecer como `Up` o `Up (healthy)`. Es normal que `airflow-init` aparezca como `Exited (0)` — es un contenedor de inicialización que solo corre una vez.
 
 ---
 
