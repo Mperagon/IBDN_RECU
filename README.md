@@ -60,10 +60,18 @@ Ejecuta estos pasos en orden una única vez. En arranques posteriores no es nece
 docker exec -e MINIO_HOST=minio flask python3 /app/setup_minio_buckets.py
 ```
 
+Si el comando anterior falla por dependencias, usa el cliente `mc`:
+
+```bash
+docker run --rm --network practica_creativa_bigdata-net \
+  --entrypoint /bin/sh minio/mc \
+  -c "mc alias set local http://minio:9000 minioadmin minioadmin && mc mb local/flight-data && mc mb local/models"
+```
+
 Debe mostrar:
 ```
-Bucket 'flight-data' creado
-Bucket 'models' creado
+Bucket created successfully `local/flight-data`.
+Bucket created successfully `local/models`.
 ```
 
 ### Paso 2 — Crear keyspace y tablas en Cassandra
@@ -97,6 +105,16 @@ CREATE TABLE IF NOT EXISTS flight_predictions (
 ```
 
 ### Paso 3 — Importar distancias entre aeropuertos
+
+Si el fichero no existe dentro del contenedor Flask, cópialo primero:
+
+```bash
+docker cp spark-master:/app/data/origin_dest_distances.jsonl /tmp/
+docker exec flask mkdir -p /app/data
+docker cp /tmp/origin_dest_distances.jsonl flask:/app/data/origin_dest_distances.jsonl
+```
+
+Luego importa los datos:
 
 ```bash
 docker exec flask python3 -c "
@@ -261,17 +279,13 @@ chmod 777 models
 
 ### 3. Abrir puertos en el firewall de GCP
 
+Ejecutar desde la máquina local (no desde la VM):
+
 ```bash
 gcloud compute firewall-rules create bigdata-ports \
   --allow tcp:5001,tcp:8081,tcp:5000,tcp:8080,tcp:9001,tcp:5601,tcp:9200 \
-  --target-tags=bigdata-vm
-```
-
-Si la VM no tiene el tag, añadirlo:
-
-```bash
-gcloud compute instances add-tags big-data-vm \
-  --tags=bigdata-vm --zone=europe-west1-b
+  --network=default \
+  --source-ranges=0.0.0.0/0
 ```
 
 ### 4. Obtener la IP externa de la VM
