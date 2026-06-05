@@ -2,9 +2,9 @@
 Crea los buckets necesarios en MinIO.
 Ejecutar una sola vez antes de entrenar el modelo.
 """
+import os
 from minio import Minio
-
-MINIO_ENDPOINT = "127.0.0.1:9000"
+MINIO_ENDPOINT = os.getenv("MINIO_HOST", "127.0.0.1") + ":9000"
 MINIO_ACCESS   = "minioadmin"
 MINIO_SECRET   = "minioadmin"
 
