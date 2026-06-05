@@ -34,7 +34,14 @@ git clone https://github.com/Mperagon/IBDN.git practica_creativa
 cd practica_creativa
 ```
 
-### 2. Descargar los datos de entrenamiento
+### 2. Preparar directorios
+
+```bash
+mkdir -p models mlflow/artifacts logs
+chmod 777 models
+```
+
+### 3. Descargar los datos de entrenamiento
 
 ```bash
 bash resources/download_data.sh
@@ -42,7 +49,7 @@ bash resources/download_data.sh
 
 Descarga `data/simple_flight_delay_features.jsonl.bz2` y `data/origin_dest_distances.jsonl`. Puede tardar varios minutos.
 
-### 3. Levantar todos los servicios
+### 4. Levantar todos los servicios
 
 ```bash
 docker compose up -d
