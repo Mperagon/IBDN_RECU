@@ -246,21 +246,105 @@ Abre el navegador en `http://localhost:5001/flights/delays/predict_kafka`, relle
 
 ## Despliegue en Google Cloud (GCP)
 
-### Requisitos en la VM
-- VM con al menos 16 GB de RAM (e2-standard-4 o superior)
-- Docker y Docker Compose instalados
-- Zona recomendada: `europe-west1-b`
+Esta sección explica cómo crear una VM en GCP desde cero, instalar Docker y desplegar el sistema completo.
 
-### 1. Arrancar la VM y conectarse
+---
+
+### Paso 1 — Instalar Google Cloud SDK en tu máquina local
+
+Si no tienes `gcloud` instalado:
 
 ```bash
-gcloud compute instances start big-data-vm --zone=europe-west1-b
+# Linux / WSL
+curl https://sdk.cloud.google.com | bash
+exec -l $SHELL
+gcloud init
+```
+
+Durante `gcloud init` te pedirá que inicies sesión con tu cuenta de Google y que selecciones el proyecto de GCP.
+
+---
+
+### Paso 2 — Crear la VM desde cero
+
+Ejecuta esto desde tu máquina local. Crea una VM con 16 GB de RAM y 50 GB de disco:
+
+```bash
+gcloud compute instances create big-data-vm \
+  --zone=europe-west1-b \
+  --machine-type=e2-standard-4 \
+  --image-family=ubuntu-2204-lts \
+  --image-project=ubuntu-os-cloud \
+  --boot-disk-size=50GB \
+  --boot-disk-type=pd-standard \
+  --tags=bigdata
+```
+
+> `e2-standard-4` = 4 vCPUs y 16 GB de RAM. Mínimo recomendado para este sistema.
+
+---
+
+### Paso 3 — Abrir los puertos en el firewall de GCP
+
+Ejecuta desde tu máquina local (no desde la VM):
+
+```bash
+gcloud compute firewall-rules create bigdata-ports \
+  --allow tcp:5001,tcp:8081,tcp:5000,tcp:8080,tcp:9001,tcp:5601,tcp:9200 \
+  --network=default \
+  --source-ranges=0.0.0.0/0 \
+  --target-tags=bigdata
+```
+
+Esto abre los puertos de Flask, Airflow, MLflow, Spark, MinIO y Kibana al exterior.
+
+---
+
+### Paso 4 — Conectarse a la VM e instalar Docker
+
+```bash
+# Conectarse a la VM
 gcloud compute ssh big-data-vm --zone=europe-west1-b
 ```
 
-### 2. Subir el proyecto desde local
+Una vez dentro de la VM, instalar Docker:
 
-Desde tu máquina local, empaquetar y subir:
+```bash
+# Actualizar paquetes
+sudo apt-get update && sudo apt-get upgrade -y
+
+# Instalar dependencias
+sudo apt-get install -y ca-certificates curl gnupg
+
+# Añadir la clave GPG oficial de Docker
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+  sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+# Añadir el repositorio de Docker
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Instalar Docker y Docker Compose
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+# Añadir tu usuario al grupo docker (para no necesitar sudo)
+sudo usermod -aG docker $USER
+newgrp docker
+
+# Verificar instalación
+docker --version
+docker compose version
+```
+
+---
+
+### Paso 5 — Subir el proyecto a la VM
+
+Desde tu **máquina local**, empaquetar el proyecto y subirlo:
 
 ```bash
 cd ~
@@ -272,10 +356,11 @@ tar --exclude='practica_creativa/env' \
     --exclude='practica_creativa/mlflow' \
     --exclude='practica_creativa/models' \
     -czf practica.tar.gz practica_creativa/
+
 gcloud compute scp practica.tar.gz big-data-vm:~ --zone=europe-west1-b
 ```
 
-En la VM, descomprimir y preparar directorios:
+En la **VM**, descomprimir y preparar directorios:
 
 ```bash
 tar -xzf practica.tar.gz
@@ -284,30 +369,28 @@ mkdir -p mlflow/artifacts models logs
 chmod 777 models
 ```
 
-### 3. Abrir puertos en el firewall de GCP
+---
 
-Ejecutar desde la máquina local (no desde la VM):
-
-```bash
-gcloud compute firewall-rules create bigdata-ports \
-  --allow tcp:5001,tcp:8081,tcp:5000,tcp:8080,tcp:9001,tcp:5601,tcp:9200 \
-  --network=default \
-  --source-ranges=0.0.0.0/0
-```
-
-### 4. Obtener la IP externa de la VM
+### Paso 6 — Levantar el sistema
 
 ```bash
-gcloud compute instances describe big-data-vm \
-  --zone=europe-west1-b \
-  --format='get(networkInterfaces[0].accessConfigs[0].natIP)'
+docker compose up -d
 ```
 
-### 5. Levantar el sistema y setup inicial
+Espera 2-3 minutos y comprueba que todos los contenedores están arriba:
 
-Igual que en local, pero reemplazando `localhost` por la IP externa de la VM en todas las URLs.
+```bash
+docker compose ps
+```
 
-Para crear los buckets de MinIO usa el cliente `mc` en lugar del script Python:
+---
+
+### Paso 7 — Configuración inicial (igual que en local)
+
+Sigue los mismos pasos de la sección **Configuración inicial** de este README:
+crear buckets en MinIO, crear tablas en Cassandra, reiniciar Flask, importar distancias, crear tabla Iceberg y entrenar el modelo con Airflow.
+
+Para crear los buckets de MinIO en la VM usa el cliente `mc` en lugar del script Python (por si Flask aún no está corriendo):
 
 ```bash
 docker run --rm --network practica_creativa_bigdata-net \
@@ -315,26 +398,41 @@ docker run --rm --network practica_creativa_bigdata-net \
   -c "mc alias set local http://minio:9000 minioadmin minioadmin && mc mb local/flight-data && mc mb local/models"
 ```
 
-Si el fichero de distancias no está en el contenedor Flask, cópialo primero:
+---
+
+### Paso 8 — Obtener la IP externa y acceder
 
 ```bash
-docker cp spark-master:/app/data/origin_dest_distances.jsonl /tmp/
-docker exec flask mkdir -p /app/data
-docker cp /tmp/origin_dest_distances.jsonl flask:/app/data/origin_dest_distances.jsonl
+gcloud compute instances describe big-data-vm \
+  --zone=europe-west1-b \
+  --format='get(networkInterfaces[0].accessConfigs[0].natIP)'
 ```
 
-### 6. Acceder a los servicios
+Sustituye `IP_EXTERNA` por la IP obtenida:
 
-Sustituye `IP_EXTERNA` por la IP obtenida en el paso 4:
+| Servicio      | URL                         | Credenciales            |
+|---------------|-----------------------------|-------------------------|
+| Flask (web)   | http://IP_EXTERNA:5001      | —                       |
+| Airflow       | http://IP_EXTERNA:8081      | admin / admin           |
+| MLflow        | http://IP_EXTERNA:5000      | —                       |
+| Spark UI      | http://IP_EXTERNA:8080      | —                       |
+| MinIO Console | http://IP_EXTERNA:9001      | minioadmin / minioadmin |
+| Kibana        | http://IP_EXTERNA:5601      | —                       |
 
-| Servicio      | URL                         |
-|---------------|-----------------------------|
-| Flask (web)   | http://IP_EXTERNA:5001      |
-| Airflow       | http://IP_EXTERNA:8081      |
-| MLflow        | http://IP_EXTERNA:5000      |
-| Kibana        | http://IP_EXTERNA:5601      |
-| MinIO Console | http://IP_EXTERNA:9001      |
-| Spark UI      | http://IP_EXTERNA:8080      |
+---
+
+### Paso 9 — Arrancar y parar la VM
+
+```bash
+# Arrancar la VM (desde local)
+gcloud compute instances start big-data-vm --zone=europe-west1-b
+
+# Parar la VM cuando no la uses (evita costes)
+gcloud compute instances stop big-data-vm --zone=europe-west1-b
+```
+
+> Parar la VM detiene el cobro por cómputo. Los datos del disco persisten.
+> Cuando la vuelvas a arrancar, solo necesitas `docker compose up -d` dentro de la VM.
 
 ---
 
