@@ -94,29 +94,21 @@ Bucket created successfully `local/models`.
 Espera a que Cassandra esté `healthy` antes de ejecutar esto:
 
 ```bash
-docker exec cassandra cqlsh -e "
-CREATE KEYSPACE IF NOT EXISTS flight_data
-  WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};
+docker exec -i cassandra cqlsh < setup_cassandra.cql
+```
 
-USE flight_data;
+### Paso 2.1 — Reiniciar Flask
 
-CREATE TABLE IF NOT EXISTS origin_dest_distances (
-  origin   text,
-  dest     text,
-  distance double,
-  PRIMARY KEY ((origin, dest))
-);
+Flask arranca junto con el resto de servicios pero se cae porque Cassandra aún no tiene el keyspace creado. Una vez ejecutado el paso anterior, reinícialo:
 
-CREATE TABLE IF NOT EXISTS flight_predictions (
-  uuid       text PRIMARY KEY,
-  prediction text,
-  timestamp  timestamp,
-  origin     text,
-  dest       text,
-  carrier    text,
-  dep_delay  double
-);
-"
+```bash
+docker compose restart flask
+```
+
+Verifica que arrancó correctamente:
+
+```bash
+docker logs flask --tail 10
 ```
 
 ### Paso 3 — Importar distancias entre aeropuertos

@@ -8,3 +8,13 @@ CREATE TABLE IF NOT EXISTS origin_dest_distances (
     distance double,
     PRIMARY KEY ((origin, dest))
 );
+
+CREATE TABLE IF NOT EXISTS flight_predictions (
+    uuid       text PRIMARY KEY,
+    prediction text,
+    timestamp  timestamp,
+    origin     text,
+    dest       text,
+    carrier    text,
+    dep_delay  double
+);
