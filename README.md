@@ -165,7 +165,19 @@ OK - Tabla Iceberg creada en s3a://flight-data/iceberg/flight_features
    - `train_model` — entrena el Random Forest y guarda los modelos
    - `register_mlflow` — verifica las métricas en MLflow
 
-Una vez completado, los modelos quedan guardados en `/app/models/` y en MinIO `s3a://models/`.
+Una vez completado, los modelos quedan guardados en MinIO `s3a://models/` (Lakehouse distribuido).
+
+> **Nota:** El job de Spark Streaming (`spark-job`) carga los modelos directamente desde MinIO mediante el protocolo S3A (`s3a://models/`), no desde disco local. Esto garantiza el modo completamente distribuido: tanto el entrenamiento como la inferencia usan MinIO como único almacén de modelos.
+
+### Verificar que el job de inferencia está corriendo
+
+Una vez entrenado el modelo, el contenedor `spark-job` se envía al cluster en **deploy mode cluster**:
+
+```bash
+docker compose logs spark-job --tail 20
+```
+
+En la Spark Master UI (`http://localhost:8080`) debe aparecer bajo **Running Drivers** (no bajo Applications), ya que el driver corre en un worker del cluster.
 
 ---
 

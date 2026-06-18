@@ -3,6 +3,7 @@ networks:
     driver: bridge
 
 volumes:
+  ivy2_cache:
   mongodb_data:
   cassandra_data:
   minio_data:
@@ -122,16 +123,24 @@ services:
     networks:
       - bigdata-net
     volumes:
+      - ivy2_cache:/root/.ivy2
+      - ivy2_cache:/root/.ivy2
       - .:/app
     user: root
     environment:
       - PROJECT_HOME=/app
       - KAFKA_BROKER=kafka:9092
+      - SPARK_MASTER=spark://spark-master:7077
+      - MODELS_PATH=s3a://models
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
     command: >
       /opt/spark/bin/spark-submit
       --class es.upm.dit.ging.predictor.MakePrediction
       --master spark://spark-master:7077
-      --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3
+      --deploy-mode cluster
+      --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262
       /app/flight_prediction/target/scala-2.12/flight_prediction_2.12-0.1.jar
     depends_on:
       - spark-master
@@ -150,6 +159,7 @@ services:
     environment:
       - PROJECT_HOME=/app
       - KAFKA_BROKER=kafka:9092
+      - SPARK_MASTER=spark://spark-master:7077
       - CASSANDRA_HOST=cassandra
       - MONGO_HOST=mongodb
     depends_on:
