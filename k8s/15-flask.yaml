@@ -32,8 +32,8 @@ spec:
             - until nc -z kafka 9092; do sleep 3; done
       containers:
         - name: flask
-          image: flight-prediction/flask:latest
-          imagePullPolicy: Never
+          image: ${IMAGE_PREFIX}flask:latest
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 5001
           env:

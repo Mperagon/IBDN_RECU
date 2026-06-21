@@ -15,8 +15,8 @@ spec:
     spec:
       containers:
         - name: mlflow
-          image: flight-prediction/mlflow:latest
-          imagePullPolicy: Never
+          image: ${IMAGE_PREFIX}mlflow:latest
+          imagePullPolicy: IfNotPresent
           command:
             - mlflow
             - server

@@ -11,14 +11,20 @@ echo "=== Verificando contexto kubectl ==="
 kubectl config current-context
 kubectl cluster-info --request-timeout=5s
 
+IMAGE_PREFIX="flight-prediction/"
+
 echo ""
 echo "=== 1. Construyendo imágenes custom ==="
-docker build -t flight-prediction/flask:latest   -f "$REPO_ROOT/Dockerfile.flask"         "$REPO_ROOT"
-docker build -t flight-prediction/mlflow:latest  -f "$REPO_ROOT/docker/Dockerfile.mlflow"  "$REPO_ROOT"
-docker build -t flight-prediction/airflow:latest -f "$REPO_ROOT/docker/Dockerfile.airflow" "$REPO_ROOT"
+docker build -t ${IMAGE_PREFIX}flask:latest   -f "$REPO_ROOT/Dockerfile.flask"         "$REPO_ROOT"
+docker build -t ${IMAGE_PREFIX}mlflow:latest  -f "$REPO_ROOT/docker/Dockerfile.mlflow"  "$REPO_ROOT"
+docker build -t ${IMAGE_PREFIX}airflow:latest -f "$REPO_ROOT/docker/Dockerfile.airflow" "$REPO_ROOT"
 
 echo ""
 echo "=== 2. Aplicando manifiestos ==="
+apply_manifest() {
+  IMAGE_PREFIX=$IMAGE_PREFIX envsubst < "$1" | kubectl apply -f -
+}
+
 kubectl apply -f "$REPO_ROOT/k8s/00-namespace.yaml"
 kubectl apply -f "$REPO_ROOT/k8s/01-secrets.yaml"
 kubectl apply -f "$REPO_ROOT/k8s/02-rbac.yaml"
@@ -44,13 +50,13 @@ kubectl wait --for=condition=ready pod -l app=postgres-mlflow  -n $NAMESPACE --t
 kubectl wait --for=condition=ready pod -l app=postgres-airflow -n $NAMESPACE --timeout=60s
 
 echo "  → MLflow..."
-kubectl apply -f "$REPO_ROOT/k8s/09-mlflow.yaml"
+apply_manifest "$REPO_ROOT/k8s/09-mlflow.yaml"
 
 echo "  → Airflow..."
 kubectl create configmap airflow-dags \
   --from-file=setup_k8s.py="$REPO_ROOT/resources/airflow/setup_k8s.py" \
   -n $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
-kubectl apply -f "$REPO_ROOT/k8s/11-airflow.yaml"
+apply_manifest "$REPO_ROOT/k8s/11-airflow.yaml"
 kubectl wait --for=condition=complete job/airflow-init -n $NAMESPACE --timeout=120s
 
 echo "  → Elasticsearch + Kibana + Logstash..."
@@ -59,7 +65,7 @@ kubectl apply -f "$REPO_ROOT/k8s/13-kibana.yaml"
 kubectl apply -f "$REPO_ROOT/k8s/14-logstash.yaml"
 
 echo "  → Flask..."
-kubectl apply -f "$REPO_ROOT/k8s/15-flask.yaml"
+apply_manifest "$REPO_ROOT/k8s/15-flask.yaml"
 
 echo ""
 echo "=== 3. Configuración inicial en MinIO ==="
