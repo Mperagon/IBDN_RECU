@@ -141,6 +141,20 @@ cluster.shutdown()
 
 Importa ~4.696 registros.
 
+### Paso 3.5 — Subir el JAR de inferencia a MinIO
+
+El job de Spark Streaming carga su JAR directamente desde MinIO (`s3a://models/`) para no depender del sistema de ficheros local.
+
+```bash
+docker run --rm \
+  --network practica_creativa_bigdata-net \
+  -v "$(pwd)/flight_prediction/target/scala-2.12/flight_prediction_2.12-0.1.jar:/jar/flight_prediction_2.12-0.1.jar" \
+  --entrypoint /bin/sh minio/mc \
+  -c "mc alias set local http://minio:9000 minioadmin minioadmin && mc cp /jar/flight_prediction_2.12-0.1.jar local/models/flight_prediction_2.12-0.1.jar"
+```
+
+Debe mostrar el progreso de subida y terminar sin errores.
+
 ### Paso 4 — Crear tabla Iceberg en MinIO
 
 Este paso convierte los datos de entrenamiento al formato Parquet/Iceberg distribuido en MinIO. Tarda varios minutos.

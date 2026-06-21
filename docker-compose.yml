@@ -100,8 +100,6 @@ services:
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
     depends_on:
       - spark-master
-    volumes:
-      - .:/app
 
   spark-worker-2:
     image: apache/spark:3.5.3
@@ -114,8 +112,6 @@ services:
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
     depends_on:
       - spark-master
-    volumes:
-      - .:/app
 
   spark-job:
     image: apache/spark:3.5.3
@@ -124,11 +120,8 @@ services:
       - bigdata-net
     volumes:
       - ivy2_cache:/root/.ivy2
-      - ivy2_cache:/root/.ivy2
-      - .:/app
     user: root
     environment:
-      - PROJECT_HOME=/app
       - KAFKA_BROKER=kafka:9092
       - SPARK_MASTER=spark://spark-master:7077
       - MODELS_PATH=s3a://models
@@ -141,7 +134,7 @@ services:
       --master spark://spark-master:7077
       --deploy-mode cluster
       --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262
-      /app/flight_prediction/target/scala-2.12/flight_prediction_2.12-0.1.jar
+      s3a://models/flight_prediction_2.12-0.1.jar
     depends_on:
       - spark-master
       - kafka
