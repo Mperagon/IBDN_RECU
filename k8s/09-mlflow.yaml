@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow
+  namespace: flight-prediction
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mlflow
+  template:
+    metadata:
+      labels:
+        app: mlflow
+    spec:
+      containers:
+        - name: mlflow
+          image: flight-prediction/mlflow:latest
+          imagePullPolicy: Never
+          command:
+            - mlflow
+            - server
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "5000"
+            - --backend-store-uri
+            - postgresql://mlflow:mlflow@postgres-mlflow/mlflow
+            - --default-artifact-root
+            - s3://models/mlflow-artifacts
+            - --artifacts-destination
+            - s3://models/mlflow-artifacts
+          ports:
+            - containerPort: 5000
+          env:
+            - name: MLFLOW_S3_ENDPOINT_URL
+              value: http://minio:9000
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: access-key
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: secret-key
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow
+  namespace: flight-prediction
+spec:
+  selector:
+    app: mlflow
+  ports:
+    - port: 5000
+      targetPort: 5000
+      nodePort: 30500
+  type: NodePort

@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: airflow-dags
+  namespace: flight-prediction
+binaryData: {}
+# Los DAGs se montan como archivos desde este ConfigMap.
+# Para actualizar el DAG: kubectl create configmap airflow-dags \
+#   --from-file=setup_k8s.py=resources/airflow/setup_k8s.py \
+#   -n flight-prediction --dry-run=client -o yaml | kubectl apply -f -

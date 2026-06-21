@@ -1,0 +1,158 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: airflow-env
+  namespace: flight-prediction
+data:
+  AIRFLOW__CORE__EXECUTOR: KubernetesExecutor
+  AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+  AIRFLOW__WEBSERVER__SECRET_KEY: mysecretkey
+  AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+  AIRFLOW__KUBERNETES__NAMESPACE: flight-prediction
+  AIRFLOW__KUBERNETES__WORKER_CONTAINER_REPOSITORY: apache/airflow
+  AIRFLOW__KUBERNETES__WORKER_CONTAINER_TAG: "2.9.1"
+  MLFLOW_TRACKING_URI: http://mlflow:5000
+---
+# Job de inicialización de Airflow
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: airflow-init
+  namespace: flight-prediction
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: airflow
+      initContainers:
+        - name: wait-postgres
+          image: postgres:15-alpine
+          command:
+            - sh
+            - -c
+            - until pg_isready -h postgres-airflow -U airflow; do sleep 3; done
+      containers:
+        - name: airflow-init
+          image: flight-prediction/airflow:latest
+          imagePullPolicy: Never
+          command:
+            - bash
+            - -c
+            - |
+              airflow db migrate &&
+              airflow users create \
+                --username admin --password admin \
+                --firstname Admin --lastname Admin \
+                --role Admin --email admin@example.com || true
+          env:
+            - name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-airflow-credentials
+                  key: connection
+          envFrom:
+            - configMapRef:
+                name: airflow-env
+---
+# Airflow Webserver
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-webserver
+  namespace: flight-prediction
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: airflow-webserver
+  template:
+    metadata:
+      labels:
+        app: airflow-webserver
+    spec:
+      serviceAccountName: airflow
+      containers:
+        - name: webserver
+          image: flight-prediction/airflow:latest
+          imagePullPolicy: Never
+          command: ["airflow", "webserver", "--port", "8080"]
+          ports:
+            - containerPort: 8080
+          env:
+            - name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-airflow-credentials
+                  key: connection
+          envFrom:
+            - configMapRef:
+                name: airflow-env
+          volumeMounts:
+            - name: dags
+              mountPath: /opt/airflow/dags
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 500m
+      volumes:
+        - name: dags
+          configMap:
+            name: airflow-dags
+---
+# Airflow Scheduler
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-scheduler
+  namespace: flight-prediction
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: airflow-scheduler
+  template:
+    metadata:
+      labels:
+        app: airflow-scheduler
+    spec:
+      serviceAccountName: airflow
+      containers:
+        - name: scheduler
+          image: flight-prediction/airflow:latest
+          imagePullPolicy: Never
+          command: ["airflow", "scheduler"]
+          env:
+            - name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-airflow-credentials
+                  key: connection
+          envFrom:
+            - configMapRef:
+                name: airflow-env
+          volumeMounts:
+            - name: dags
+              mountPath: /opt/airflow/dags
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 500m
+      volumes:
+        - name: dags
+          configMap:
+            name: airflow-dags
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: airflow-webserver
+  namespace: flight-prediction
+spec:
+  selector:
+    app: airflow-webserver
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: 30808
+  type: NodePort

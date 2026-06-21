@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flask
+  namespace: flight-prediction
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flask
+  template:
+    metadata:
+      labels:
+        app: flask
+    spec:
+      initContainers:
+        - name: wait-cassandra-init
+          image: busybox
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z cassandra 9042; do
+                echo "Waiting for Cassandra..."; sleep 5
+              done
+              echo "Cassandra ready"
+        - name: wait-kafka
+          image: busybox
+          command:
+            - sh
+            - -c
+            - until nc -z kafka 9092; do sleep 3; done
+      containers:
+        - name: flask
+          image: flight-prediction/flask:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 5001
+          env:
+            - name: PROJECT_HOME
+              value: /app
+            - name: KAFKA_BROKER
+              value: kafka:9092
+            - name: CASSANDRA_HOST
+              value: cassandra
+            - name: MONGO_HOST
+              value: mongodb
+          readinessProbe:
+            httpGet:
+              path: /flights/delays/predict_kafka
+              port: 5001
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flask
+  namespace: flight-prediction
+spec:
+  selector:
+    app: flask
+  ports:
+    - port: 5001
+      targetPort: 5001
+      nodePort: 30501
+  type: NodePort

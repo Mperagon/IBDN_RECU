@@ -1,0 +1,199 @@
+# Volumen compartido para caché de dependencias ivy2 (S3A, Kafka JARs)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ivy2-cache
+  namespace: flight-prediction
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 2Gi
+---
+# Spark Master
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-master
+  namespace: flight-prediction
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark-master
+  template:
+    metadata:
+      labels:
+        app: spark-master
+    spec:
+      containers:
+        - name: spark-master
+          image: apache/spark:3.5.3
+          command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+          ports:
+            - containerPort: 8080
+            - containerPort: 7077
+          env:
+            - name: SPARK_MODE
+              value: master
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 500m
+          volumeMounts:
+            - name: ivy2
+              mountPath: /root/.ivy2
+      volumes:
+        - name: ivy2
+          persistentVolumeClaim:
+            claimName: ivy2-cache
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-master
+  namespace: flight-prediction
+spec:
+  selector:
+    app: spark-master
+  ports:
+    - name: ui
+      port: 8080
+      targetPort: 8080
+      nodePort: 30808
+    - name: rpc
+      port: 7077
+      targetPort: 7077
+  type: NodePort
+---
+# Spark Worker 1
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-worker-1
+  namespace: flight-prediction
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark-worker-1
+  template:
+    metadata:
+      labels:
+        app: spark-worker-1
+    spec:
+      containers:
+        - name: spark-worker
+          image: apache/spark:3.5.3
+          command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+          env:
+            - name: SPARK_MODE
+              value: worker
+          resources:
+            requests:
+              memory: 2Gi
+              cpu: 1000m
+          volumeMounts:
+            - name: ivy2
+              mountPath: /root/.ivy2
+      volumes:
+        - name: ivy2
+          persistentVolumeClaim:
+            claimName: ivy2-cache
+---
+# Spark Worker 2
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-worker-2
+  namespace: flight-prediction
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark-worker-2
+  template:
+    metadata:
+      labels:
+        app: spark-worker-2
+    spec:
+      containers:
+        - name: spark-worker
+          image: apache/spark:3.5.3
+          command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+          env:
+            - name: SPARK_MODE
+              value: worker
+          resources:
+            requests:
+              memory: 2Gi
+              cpu: 1000m
+          volumeMounts:
+            - name: ivy2
+              mountPath: /root/.ivy2
+      volumes:
+        - name: ivy2
+          persistentVolumeClaim:
+            claimName: ivy2-cache
+---
+# Spark Streaming Job (se reinicia si falla, espera a que el modelo esté en MinIO)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-job
+  namespace: flight-prediction
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark-job
+  template:
+    metadata:
+      labels:
+        app: spark-job
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: spark-job
+          image: apache/spark:3.5.3
+          command:
+            - /opt/spark/bin/spark-submit
+            - --class
+            - es.upm.dit.ging.predictor.MakePrediction
+            - --master
+            - spark://spark-master:7077
+            - --deploy-mode
+            - cluster
+            - --packages
+            - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262
+            - http://minio:9000/models/flight_prediction_2.12-0.1.jar
+          env:
+            - name: KAFKA_BROKER
+              value: kafka:9092
+            - name: SPARK_MASTER
+              value: spark://spark-master:7077
+            - name: MODELS_PATH
+              value: s3a://models
+            - name: MINIO_ENDPOINT
+              value: http://minio:9000
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: access-key
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: secret-key
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+          volumeMounts:
+            - name: ivy2
+              mountPath: /root/.ivy2
+      volumes:
+        - name: ivy2
+          persistentVolumeClaim:
+            claimName: ivy2-cache

@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-config
+  namespace: flight-prediction
+data:
+  logstash.conf: |
+    input {
+      kafka {
+        bootstrap_servers => "kafka:9092"
+        topics => ["flight-delay-ml-request", "flight-predictions"]
+        codec => "json"
+        group_id => "logstash-flight"
+        auto_offset_reset => "latest"
+      }
+    }
+    filter {
+      mutate {
+        add_field => { "log_type" => "flight_prediction" }
+      }
+      date {
+        match => ["timestamp", "ISO8601", "UNIX_MS"]
+        target => "@timestamp"
+        tag_on_failure => []
+      }
+    }
+    output {
+      elasticsearch {
+        hosts => ["elasticsearch:9200"]
+        index => "flight-predictions-%{+YYYY.MM.dd}"
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logstash
+  namespace: flight-prediction
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: logstash
+  template:
+    metadata:
+      labels:
+        app: logstash
+    spec:
+      containers:
+        - name: logstash
+          image: docker.elastic.co/logstash/logstash:8.13.0
+          volumeMounts:
+            - name: config
+              mountPath: /usr/share/logstash/pipeline/logstash.conf
+              subPath: logstash.conf
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+      volumes:
+        - name: config
+          configMap:
+            name: logstash-config
