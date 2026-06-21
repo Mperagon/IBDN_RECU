@@ -44,8 +44,7 @@ docker exec -u root \
   --master spark://spark-master:7077 \
   --conf spark.driver.host=spark-master \
   --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262 \
-  /app/resources/train_spark_mllib_model.py \
-  /app
+  http://minio:9000/flight-data/scripts/train_spark_mllib_model.py
 """,
     execution_timeout=timedelta(minutes=50),
     dag=training_dag,

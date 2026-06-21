@@ -141,19 +141,27 @@ cluster.shutdown()
 
 Importa ~4.696 registros.
 
-### Paso 3.5 — Subir el JAR de inferencia a MinIO
+### Paso 3.5 — Configurar MinIO para modo completamente distribuido
 
-El job de Spark Streaming carga su JAR directamente desde MinIO (`s3a://models/`) para no depender del sistema de ficheros local.
+Este paso sube el JAR de inferencia y el script de entrenamiento a MinIO, y configura los buckets con acceso de lectura pública para que Spark pueda descargarlos por HTTP sin depender del disco local.
 
 ```bash
-docker run --rm \
-  --network practica_creativa_bigdata-net \
-  -v "$(pwd)/flight_prediction/target/scala-2.12/flight_prediction_2.12-0.1.jar:/jar/flight_prediction_2.12-0.1.jar" \
-  --entrypoint /bin/sh minio/mc \
-  -c "mc alias set local http://minio:9000 minioadmin minioadmin && mc cp /jar/flight_prediction_2.12-0.1.jar local/models/flight_prediction_2.12-0.1.jar"
+docker exec spark-master python3 /app/setup_minio_distributed.py
 ```
 
-Debe mostrar el progreso de subida y terminar sin errores.
+Debe mostrar:
+```
+=== 1. Subiendo JAR de inferencia a MinIO ===
+  OK: .../flight_prediction_2.12-0.1.jar -> s3://models/flight_prediction_2.12-0.1.jar
+=== 2. Subiendo script de entrenamiento a MinIO ===
+  OK: .../train_spark_mllib_model.py -> s3://flight-data/scripts/train_spark_mllib_model.py
+=== 3. Haciendo bucket 'models' de lectura publica ===
+  OK: bucket 'models' set to public read
+=== 4. Haciendo bucket 'flight-data' de lectura publica ===
+  OK: bucket 'flight-data' set to public read
+```
+
+A partir de este punto, Spark descarga el JAR y el script de entrenamiento directamente desde MinIO por HTTP, sin montes de volúmenes locales.
 
 ### Paso 4 — Crear tabla Iceberg en MinIO
 

@@ -88,7 +88,7 @@ services:
       - SPARK_MODE=master
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
     volumes:
-      - .:/app
+      - ivy2_cache:/root/.ivy2
 
   spark-worker-1:
     image: apache/spark:3.5.3
@@ -101,6 +101,8 @@ services:
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
     depends_on:
       - spark-master
+    volumes:
+      - ivy2_cache:/root/.ivy2
 
   spark-worker-2:
     image: apache/spark:3.5.3
@@ -113,6 +115,8 @@ services:
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
     depends_on:
       - spark-master
+    volumes:
+      - ivy2_cache:/root/.ivy2
 
   spark-job:
     image: apache/spark:3.5.3
@@ -135,7 +139,7 @@ services:
       --master spark://spark-master:7077
       --deploy-mode cluster
       --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262
-      s3a://models/flight_prediction_2.12-0.1.jar
+      http://minio:9000/models/flight_prediction_2.12-0.1.jar
     depends_on:
       - spark-master
       - kafka
@@ -181,7 +185,9 @@ services:
       retries: 5
 
   mlflow:
-    image: ghcr.io/mlflow/mlflow:v2.14.1
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.mlflow
     container_name: mlflow
     ports:
       - "5000:5000"
