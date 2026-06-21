@@ -85,9 +85,6 @@ def main(base_path):
         outputCol="ArrDelayBucket"
     )
 
-    # Guardar bucketizer — local Y MinIO
-    arrival_bucketizer.write().overwrite().save(
-        "{}/models/arrival_bucketizer_2.0.bin".format(base_path))
     arrival_bucketizer.write().overwrite().save(
         "{}/arrival_bucketizer_2.0.bin".format(MINIO_MODELS))
 
@@ -102,9 +99,6 @@ def main(base_path):
         ml_bucketized_features = string_indexer_model.transform(ml_bucketized_features)
         ml_bucketized_features = ml_bucketized_features.drop(column)
 
-        # Guardar string indexer — local Y MinIO
-        string_indexer_model.write().overwrite().save(
-            "{}/models/string_indexer_model_{}.bin".format(base_path, column))
         string_indexer_model.write().overwrite().save(
             "{}/string_indexer_model_{}.bin".format(MINIO_MODELS, column))
 
@@ -116,9 +110,6 @@ def main(base_path):
     )
     final_vectorized_features = vector_assembler.transform(ml_bucketized_features)
 
-    # Guardar vector assembler — local Y MinIO
-    vector_assembler.write().overwrite().save(
-        "{}/models/numeric_vector_assembler.bin".format(base_path))
     vector_assembler.write().overwrite().save(
         "{}/numeric_vector_assembler.bin".format(MINIO_MODELS))
 
@@ -137,15 +128,10 @@ def main(base_path):
     )
     model = rfc.fit(final_vectorized_features)
 
-    # Guardar modelo RF — local Y MinIO
-    model.write().overwrite().save(
-        "{}/models/spark_random_forest_classifier.flight_delays.5.0.bin".format(base_path))
     model.write().overwrite().save(
         "{}/spark_random_forest_classifier.flight_delays.5.0.bin".format(MINIO_MODELS))
 
-    print("\n=== Modelos guardados ===")
-    print("  Local: {}/models/".format(base_path))
-    print("  MinIO: {}/".format(MINIO_MODELS))
+    print("\n=== Modelos guardados en MinIO: {}/".format(MINIO_MODELS))
 
     predictions = model.transform(final_vectorized_features)
 

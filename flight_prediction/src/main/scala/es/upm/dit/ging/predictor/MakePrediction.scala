@@ -164,7 +164,7 @@ object MakePrediction {
       .format("kafka")
       .option("kafka.bootstrap.servers", "kafka:9092")
       .option("topic", "flight-predictions")
-      .option("checkpointLocation", "/tmp/spark_flight_predictions_kafka")
+      .option("checkpointLocation", "s3a://models/checkpoints/spark_flight_predictions_kafka")
       .outputMode("append")
       .start()
 
