@@ -1,4 +1,4 @@
-import sys, os, re
+import sys, os, re, time
 import pymongo
 import datetime, iso8601
 from cassandra.cluster import Cluster
@@ -32,12 +32,21 @@ def strip_place(url):
     return url
   return p
 
-def get_cassandra_session():
-  """Return a connected Cassandra session for the flight_data keyspace"""
+def get_cassandra_session(retries=10, delay=6):
+  """Return a connected Cassandra session for the flight_data keyspace, with retry."""
   cassandra_host = os.environ.get('CASSANDRA_HOST', '127.0.0.1')
   cluster = Cluster([cassandra_host])
-  session = cluster.connect('flight_data')
-  return cluster, session
+  last_error = None
+  for attempt in range(1, retries + 1):
+    try:
+      session = cluster.connect('flight_data')
+      print(f"Cassandra connected on attempt {attempt}")
+      return cluster, session
+    except Exception as e:
+      last_error = e
+      print(f"Cassandra attempt {attempt}/{retries} failed: {e}. Retrying in {delay}s...")
+      time.sleep(delay)
+  raise RuntimeError(f"Cannot connect to Cassandra after {retries} attempts: {last_error}")
 
 def get_flight_distance(cassandra_session, origin, dest):
   """Get the distance between a pair of airport codes from Cassandra"""

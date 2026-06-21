@@ -1,6 +1,6 @@
 # Práctica Creativa — Sistema de Predicción de Retrasos de Vuelos
 
-Arquitectura de Big Data distribuida con Spark, Kafka, Cassandra, MinIO, Airflow y MLflow, todo orquestado con Docker Compose.
+Arquitectura de Big Data completamente distribuida con Spark, Kafka, Cassandra, MinIO, Airflow y MLflow, todo orquestado con Docker Compose.
 
 ## Arquitectura
 
@@ -10,18 +10,28 @@ Flask (web) → Kafka → Spark Streaming → Cassandra
              Logstash → Elasticsearch → Kibana
                                    ↑
                             Modelo entrenado
-                            (MinIO / local)
+                            (MinIO s3a://)
                                    ↑
                     Airflow DAG → Spark MLlib ← Iceberg (MinIO)
                                       ↓
-                                   MLflow
+                                   MLflow (PostgreSQL + MinIO)
 ```
+
+### Modo distribuido
+
+- **Modelos**: guardados y leídos exclusivamente desde MinIO (`s3a://models/`)
+- **JAR de inferencia**: servido desde MinIO por HTTP (`http://minio:9000/models/...`)
+- **Script de entrenamiento**: servido desde MinIO por HTTP (`http://minio:9000/flight-data/scripts/...`)
+- **Spark Streaming**: `--deploy-mode cluster` — el driver corre en un worker del cluster
+- **Checkpoint Kafka**: `s3a://models/checkpoints/` (persiste entre reinicios)
+- **MLflow**: PostgreSQL como backend + artefactos en MinIO
+- **Cassandra**: keyspace e tablas creados automáticamente por `cassandra-init` antes de que Flask arranque
 
 ## Requisitos previos
 
 - [Docker](https://docs.docker.com/get-docker/) y Docker Compose v2
 - Git
-- 12 GB de RAM mínimo disponibles para Docker (recomendado 16 GB+)
+- 16 GB de RAM mínimo disponibles para Docker
 
 ---
 
@@ -34,14 +44,7 @@ git clone https://github.com/Mperagon/IBDN.git practica_creativa
 cd practica_creativa
 ```
 
-### 2. Preparar directorios
-
-```bash
-mkdir -p models mlflow/artifacts logs
-chmod 777 models
-```
-
-### 3. Descargar los datos de entrenamiento
+### 2. Descargar los datos de entrenamiento
 
 ```bash
 bash resources/download_data.sh
@@ -49,19 +52,25 @@ bash resources/download_data.sh
 
 Descarga `data/simple_flight_delay_features.jsonl.bz2` y `data/origin_dest_distances.jsonl`. Puede tardar varios minutos.
 
-### 4. Levantar todos los servicios
+### 3. Levantar todos los servicios
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
-Espera ~2-3 minutos a que todos los contenedores estén sanos. Comprueba el estado con:
+El flag `--build` compila la imagen personalizada de MLflow (con psycopg2 y boto3). Solo es necesario la primera vez o cuando cambie `docker/Dockerfile.mlflow`.
+
+Espera ~3-4 minutos a que todos los contenedores estén sanos:
 
 ```bash
 docker compose ps
 ```
 
-Todos deben aparecer como `Up` o `Up (healthy)`. Es normal que `airflow-init` aparezca como `Exited (0)` — es un contenedor de inicialización que solo corre una vez.
+Los siguientes contenedores aparecerán como `Exited (0)` — es normal, son de inicialización:
+- `airflow-init` — crea el esquema de base de datos de Airflow
+- `cassandra-init` — crea el keyspace `flight_data` y las tablas en Cassandra
+
+Flask **no arrancará** hasta que `cassandra-init` complete con éxito.
 
 ---
 
@@ -70,12 +79,6 @@ Todos deben aparecer como `Up` o `Up (healthy)`. Es normal que `airflow-init` ap
 Ejecuta estos pasos en orden una única vez. En arranques posteriores no es necesario repetirlos.
 
 ### Paso 1 — Crear buckets en MinIO
-
-```bash
-docker exec -e MINIO_HOST=minio flask python3 /app/setup_minio_buckets.py
-```
-
-Si el comando anterior falla por dependencias, usa el cliente `mc`:
 
 ```bash
 docker run --rm --network practica_creativa_bigdata-net \
@@ -89,42 +92,10 @@ Bucket created successfully `local/flight-data`.
 Bucket created successfully `local/models`.
 ```
 
-### Paso 2 — Crear keyspace y tablas en Cassandra
-
-Espera a que Cassandra esté `healthy` antes de ejecutar esto:
+### Paso 2 — Importar distancias entre aeropuertos en Cassandra
 
 ```bash
-docker exec cassandra cqlsh -e "CREATE KEYSPACE IF NOT EXISTS flight_data WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}; USE flight_data; CREATE TABLE IF NOT EXISTS origin_dest_distances (origin text, dest text, distance double, PRIMARY KEY ((origin, dest))); CREATE TABLE IF NOT EXISTS flight_predictions (uuid text PRIMARY KEY, prediction text, timestamp timestamp, origin text, dest text, carrier text, dep_delay double);"
-```
-
-### Paso 2.1 — Reiniciar Flask
-
-Flask arranca junto con el resto de servicios pero se cae porque Cassandra aún no tiene el keyspace creado. Una vez ejecutado el paso anterior, reinícialo:
-
-```bash
-docker compose restart flask
-```
-
-Verifica que arrancó correctamente:
-
-```bash
-docker logs flask --tail 10
-```
-
-### Paso 3 — Importar distancias entre aeropuertos
-
-Si el fichero no existe dentro del contenedor Flask, cópialo primero:
-
-```bash
-docker cp spark-master:/app/data/origin_dest_distances.jsonl /tmp/
-docker exec flask mkdir -p /app/data
-docker cp /tmp/origin_dest_distances.jsonl flask:/app/data/origin_dest_distances.jsonl
-```
-
-Luego importa los datos:
-
-```bash
-docker exec flask python3 -c "
+docker exec spark-master python3 -c "
 import json
 from cassandra.cluster import Cluster
 cluster = Cluster(['cassandra'])
@@ -141,9 +112,9 @@ cluster.shutdown()
 
 Importa ~4.696 registros.
 
-### Paso 3.5 — Configurar MinIO para modo completamente distribuido
+### Paso 3 — Configurar MinIO para modo distribuido
 
-Este paso sube el JAR de inferencia y el script de entrenamiento a MinIO, y configura los buckets con acceso de lectura pública para que Spark pueda descargarlos por HTTP sin depender del disco local.
+Sube el JAR de inferencia y el script de entrenamiento a MinIO, y configura los buckets con acceso de lectura pública para que Spark los descargue por HTTP:
 
 ```bash
 docker exec spark-master python3 /app/setup_minio_distributed.py
@@ -161,14 +132,16 @@ Debe mostrar:
   OK: bucket 'flight-data' set to public read
 ```
 
-A partir de este punto, Spark descarga el JAR y el script de entrenamiento directamente desde MinIO por HTTP, sin montes de volúmenes locales.
-
 ### Paso 4 — Crear tabla Iceberg en MinIO
 
-Este paso convierte los datos de entrenamiento al formato Parquet/Iceberg distribuido en MinIO. Tarda varios minutos.
+Convierte los datos de entrenamiento al formato Parquet/Iceberg en MinIO. Tarda varios minutos:
 
 ```bash
-docker exec -u root spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077 --conf spark.driver.host=spark-master --packages "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262" /app/resources/create_iceberg_table.py 2>&1 | grep -E "Filas|total|OK|ERROR"
+docker exec -u root spark-master /opt/spark/bin/spark-submit \
+  --master spark://spark-master:7077 \
+  --conf spark.driver.host=spark-master \
+  --packages "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262" \
+  /app/resources/create_iceberg_table.py 2>&1 | grep -E "Filas|total|OK|ERROR"
 ```
 
 Debe terminar con:
@@ -184,22 +157,18 @@ OK - Tabla Iceberg creada en s3a://flight-data/iceberg/flight_features
 3. Pulsa el botón **Trigger DAG** (▶)
 4. Espera a que las 3 tareas estén en verde (~10-15 minutos):
    - `check_spark` — verifica que el cluster Spark funciona
-   - `train_model` — entrena el Random Forest y guarda los modelos
+   - `train_model` — entrena el Random Forest y guarda los modelos **exclusivamente en MinIO**
    - `register_mlflow` — verifica las métricas en MLflow
 
-Una vez completado, los modelos quedan guardados en MinIO `s3a://models/` (Lakehouse distribuido).
+Una vez completado, los modelos quedan en `s3a://models/` y las métricas en MLflow (PostgreSQL + MinIO).
 
-> **Nota:** El job de Spark Streaming (`spark-job`) carga los modelos directamente desde MinIO mediante el protocolo S3A (`s3a://models/`), no desde disco local. Esto garantiza el modo completamente distribuido: tanto el entrenamiento como la inferencia usan MinIO como único almacén de modelos.
+### Verificar el modo distribuido
 
-### Verificar que el job de inferencia está corriendo
-
-Una vez entrenado el modelo, el contenedor `spark-job` se envía al cluster en **deploy mode cluster**:
+Comprueba en la **Spark Master UI** (`http://localhost:8080`) que el job de inferencia aparece bajo **Drivers** (no bajo Applications). Esto confirma que el driver corre en el cluster con `--deploy-mode cluster`.
 
 ```bash
 docker compose logs spark-job --tail 20
 ```
-
-En la Spark Master UI (`http://localhost:8080`) debe aparecer bajo **Running Drivers** (no bajo Applications), ya que el driver corre en un worker del cluster.
 
 ---
 
@@ -344,32 +313,19 @@ gcloud compute ssh big-data-vm --zone=europe-west1-b
 Una vez dentro de la VM, instalar Docker:
 
 ```bash
-# Actualizar paquetes
 sudo apt-get update && sudo apt-get upgrade -y
-
-# Instalar dependencias
 sudo apt-get install -y ca-certificates curl gnupg
-
-# Añadir la clave GPG oficial de Docker
 sudo install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
   sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 sudo chmod a+r /etc/apt/keyrings/docker.gpg
-
-# Añadir el repositorio de Docker
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
   https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
   sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-# Instalar Docker y Docker Compose
 sudo apt-get update
 sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-
-# Añadir tu usuario al grupo docker (para no necesitar sudo)
 sudo usermod -aG docker $USER
 newgrp docker
-
-# Verificar instalación
 docker --version
 docker compose version
 ```
@@ -394,13 +350,11 @@ tar --exclude='practica_creativa/env' \
 gcloud compute scp practica.tar.gz big-data-vm:~ --zone=europe-west1-b
 ```
 
-En la **VM**, descomprimir y preparar directorios:
+En la **VM**, descomprimir:
 
 ```bash
 tar -xzf practica.tar.gz
 cd practica_creativa
-mkdir -p mlflow/artifacts models logs
-chmod 777 models
 ```
 
 ---
@@ -408,10 +362,10 @@ chmod 777 models
 ### Paso 6 — Levantar el sistema
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
-Espera 2-3 minutos y comprueba que todos los contenedores están arriba:
+Espera 3-4 minutos y comprueba que todos los contenedores están arriba:
 
 ```bash
 docker compose ps
@@ -421,16 +375,7 @@ docker compose ps
 
 ### Paso 7 — Configuración inicial (igual que en local)
 
-Sigue los mismos pasos de la sección **Configuración inicial** de este README:
-crear buckets en MinIO, crear tablas en Cassandra, reiniciar Flask, importar distancias, crear tabla Iceberg y entrenar el modelo con Airflow.
-
-Para crear los buckets de MinIO en la VM usa el cliente `mc` en lugar del script Python (por si Flask aún no está corriendo):
-
-```bash
-docker run --rm --network practica_creativa_bigdata-net \
-  --entrypoint /bin/sh minio/mc \
-  -c "mc alias set local http://minio:9000 minioadmin minioadmin && mc mb local/flight-data && mc mb local/models"
-```
+Sigue los mismos pasos de la sección **Configuración inicial** de este README: crear buckets en MinIO, importar distancias en Cassandra, configurar MinIO distribuido, crear tabla Iceberg y entrenar el modelo con Airflow.
 
 ---
 
