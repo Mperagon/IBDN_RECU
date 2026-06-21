@@ -57,6 +57,43 @@ services:
        CREATE TABLE IF NOT EXISTS origin_dest_distances (origin text, dest text, distance double, PRIMARY KEY ((origin, dest)));
        CREATE TABLE IF NOT EXISTS flight_predictions (uuid text PRIMARY KEY, prediction text, timestamp timestamp, origin text, dest text, carrier text, dep_delay double);"
 
+  cassandra-data-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.flask
+    container_name: cassandra-data-init
+    networks:
+      - bigdata-net
+    volumes:
+      - ./data/origin_dest_distances.jsonl:/data/origin_dest_distances.jsonl:ro
+    environment:
+      - CASSANDRA_HOST=cassandra
+      - PROJECT_HOME=/app
+    command: >
+      python3 -c "
+import json, os, time
+from cassandra.cluster import Cluster
+host = os.environ.get('CASSANDRA_HOST', 'cassandra')
+for _ in range(10):
+    try:
+        cluster = Cluster([host])
+        session = cluster.connect('flight_data')
+        break
+    except Exception:
+        time.sleep(5)
+stmt = session.prepare('INSERT INTO origin_dest_distances (origin, dest, distance) VALUES (?, ?, ?)')
+with open('/data/origin_dest_distances.jsonl') as f:
+    for line in f:
+        r = json.loads(line)
+        session.execute(stmt, (r['Origin'], r['Dest'], float(r['Distance'])))
+print('Distancias importadas OK')
+cluster.shutdown()
+"
+    depends_on:
+      cassandra-init:
+        condition: service_completed_successfully
+    restart: "no"
+
   minio:
     image: minio/minio:latest
     container_name: minio
@@ -71,6 +108,28 @@ services:
       - MINIO_ROOT_USER=minioadmin
       - MINIO_ROOT_PASSWORD=minioadmin
     command: server /data --console-address ":9001"
+
+  minio-init:
+    image: python:3.12-slim
+    container_name: minio-init
+    networks:
+      - bigdata-net
+    volumes:
+      - ./setup_minio_distributed.py:/setup_minio_distributed.py:ro
+      - ./data/simple_flight_delay_features.jsonl.bz2:/mnt/raw.jsonl.bz2:ro
+      - ./flight_prediction/target/scala-2.12/flight_prediction_2.12-0.1.jar:/mnt/flight.jar:ro
+      - ./resources/train_spark_mllib_model.py:/mnt/train_script.py:ro
+      - ./resources/create_iceberg_table.py:/mnt/create_iceberg_table.py:ro
+    environment:
+      - MINIO_ENDPOINT=minio:9000
+      - JAR_PATH=/mnt/flight.jar
+      - SCRIPT_PATH=/mnt/train_script.py
+      - ICEBERG_SCRIPT_PATH=/mnt/create_iceberg_table.py
+      - DATA_PATH=/mnt/raw.jsonl.bz2
+    command: python3 /setup_minio_distributed.py
+    depends_on:
+      - minio
+    restart: "no"
 
   kafka:
     image: apache/kafka:3.9.0
@@ -177,7 +236,7 @@ services:
       - CASSANDRA_HOST=cassandra
       - MONGO_HOST=mongodb
     depends_on:
-      cassandra-init:
+      cassandra-data-init:
         condition: service_completed_successfully
       kafka:
         condition: service_started
@@ -272,10 +331,10 @@ services:
       - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres-airflow/airflow
       - AIRFLOW__CORE__LOAD_EXAMPLES=false
       - AIRFLOW__WEBSERVER__SECRET_KEY=mysecretkey
-      - AIRFLOW__CORE__DAGS_FOLDER=/practica/resources/airflow
+      - AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags
       - MLFLOW_TRACKING_URI=http://mlflow:5000
     volumes:
-      - .:/practica
+      - ./resources/airflow:/opt/airflow/dags
       - /var/run/docker.sock:/var/run/docker.sock
     command: airflow webserver --port 8080
     depends_on:
@@ -331,11 +390,11 @@ services:
       - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres-airflow/airflow
       - AIRFLOW__CORE__LOAD_EXAMPLES=false
       - AIRFLOW__WEBSERVER__SECRET_KEY=mysecretkey
-      - AIRFLOW__CORE__DAGS_FOLDER=/practica/resources/airflow
+      - AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags
       - MLFLOW_TRACKING_URI=http://mlflow:5000
       - AIRFLOW__SCHEDULER__SCHEDULER_HEARTBEAT_SEC=30
     volumes:
-      - .:/practica
+      - ./resources/airflow:/opt/airflow/dags
       - /var/run/docker.sock:/var/run/docker.sock
     command: airflow scheduler
     depends_on:

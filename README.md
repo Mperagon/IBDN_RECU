@@ -17,15 +17,25 @@ Flask (web) → Kafka → Spark Streaming → Cassandra
                                    MLflow (PostgreSQL + MinIO)
 ```
 
-### Modo distribuido
+### Modo 100% distribuido
 
-- **Modelos**: guardados y leídos exclusivamente desde MinIO (`s3a://models/`)
-- **JAR de inferencia**: servido desde MinIO por HTTP (`http://minio:9000/models/...`)
-- **Script de entrenamiento**: servido desde MinIO por HTTP (`http://minio:9000/flight-data/scripts/...`)
-- **Spark Streaming**: `--deploy-mode cluster` — el driver corre en un worker del cluster
-- **Checkpoint Kafka**: `s3a://models/checkpoints/` (persiste entre reinicios)
-- **MLflow**: PostgreSQL como backend + artefactos en MinIO
-- **Cassandra**: keyspace e tablas creados automáticamente por `cassandra-init` antes de que Flask arranque
+Todo el estado persiste en servicios distribuidos, sin dependencias de disco local:
+
+| Componente | Dónde se almacena |
+|---|---|
+| Modelos Random Forest | `s3a://models/` (MinIO) |
+| JAR de inferencia Spark | `http://minio:9000/models/...` (HTTP público) |
+| Script de entrenamiento | `s3a://flight-data/scripts/...` (MinIO) |
+| Datos brutos (JSONL) | `s3a://flight-data/raw/...` (MinIO) |
+| Tabla Iceberg (Parquet) | `s3a://flight-data/iceberg/` (MinIO) |
+| Checkpoint Kafka Spark | `s3a://models/checkpoints/` (MinIO) |
+| Métricas y runs MLflow | PostgreSQL (`postgres-mlflow`) |
+| Artefactos MLflow | `s3a://models/mlflow-artifacts/` (MinIO) |
+| Predicciones | Cassandra (`flight_data.flight_predictions`) |
+| Distancias aeropuertos | Cassandra (`flight_data.origin_dest_distances`) |
+| Estado Airflow | PostgreSQL (`postgres-airflow`) |
+- **Spark Streaming**: `--deploy-mode cluster` — el driver corre en un worker del clúster
+- **Airflow**: sólo los DAGs (`./resources/airflow`) se montan en el contenedor; ningún otro fichero local
 
 ## Requisitos previos
 
@@ -52,96 +62,59 @@ bash resources/download_data.sh
 
 Descarga `data/simple_flight_delay_features.jsonl.bz2` y `data/origin_dest_distances.jsonl`. Puede tardar varios minutos.
 
-### 3. Levantar todos los servicios
+### 3. Compilar el JAR de inferencia Spark
+
+Requiere `sbt` instalado:
+
+```bash
+cd flight_prediction
+sbt package
+cd ..
+```
+
+El JAR queda en `flight_prediction/target/scala-2.12/flight_prediction_2.12-0.1.jar`.
+
+### 4. Levantar todos los servicios
 
 ```bash
 docker compose up -d --build
 ```
 
-El flag `--build` compila la imagen personalizada de MLflow (con psycopg2 y boto3). Solo es necesario la primera vez o cuando cambie `docker/Dockerfile.mlflow`.
+El flag `--build` compila las imágenes personalizadas (Flask, MLflow, Airflow). Solo es necesario la primera vez o cuando cambien sus Dockerfiles.
 
-Espera ~3-4 minutos a que todos los contenedores estén sanos:
+Espera ~4-5 minutos a que todos los contenedores estén sanos:
 
 ```bash
 docker compose ps
 ```
 
-Los siguientes contenedores aparecerán como `Exited (0)` — es normal, son de inicialización:
-- `airflow-init` — crea el esquema de base de datos de Airflow
-- `cassandra-init` — crea el keyspace `flight_data` y las tablas en Cassandra
+Los siguientes contenedores aparecerán como `Exited (0)` — es normal, son de inicialización automática:
 
-Flask **no arrancará** hasta que `cassandra-init` complete con éxito.
+| Contenedor | Qué hace |
+|---|---|
+| `cassandra-init` | Crea el keyspace `flight_data` y las tablas en Cassandra |
+| `cassandra-data-init` | Importa las distancias entre aeropuertos en Cassandra |
+| `minio-init` | Sube el JAR, el script de entrenamiento y los datos brutos a MinIO; configura buckets públicos |
+| `airflow-init` | Crea el esquema de base de datos de Airflow y el usuario admin |
+
+Flask **no arrancará** hasta que `cassandra-data-init` complete con éxito.
 
 ---
 
 ## Configuración inicial (solo la primera vez)
 
-Ejecuta estos pasos en orden una única vez. En arranques posteriores no es necesario repetirlos.
+Una vez que todos los contenedores de inicialización hayan terminado (`Exited (0)`), solo queda:
 
-### Paso 1 — Crear buckets en MinIO
+### Paso 1 — Crear tabla Iceberg en MinIO
 
-```bash
-docker run --rm --network practica_creativa_bigdata-net \
-  --entrypoint /bin/sh minio/mc \
-  -c "mc alias set local http://minio:9000 minioadmin minioadmin && mc mb local/flight-data && mc mb local/models"
-```
-
-Debe mostrar:
-```
-Bucket created successfully `local/flight-data`.
-Bucket created successfully `local/models`.
-```
-
-### Paso 2 — Importar distancias entre aeropuertos en Cassandra
-
-```bash
-docker exec spark-master python3 -c "
-import json
-from cassandra.cluster import Cluster
-cluster = Cluster(['cassandra'])
-session = cluster.connect('flight_data')
-stmt = session.prepare('INSERT INTO origin_dest_distances (origin, dest, distance) VALUES (?, ?, ?)')
-with open('/app/data/origin_dest_distances.jsonl') as f:
-    for line in f:
-        r = json.loads(line)
-        session.execute(stmt, (r['Origin'], r['Dest'], float(r['Distance'])))
-print('Distancias importadas OK')
-cluster.shutdown()
-"
-```
-
-Importa ~4.696 registros.
-
-### Paso 3 — Configurar MinIO para modo distribuido
-
-Sube el JAR de inferencia y el script de entrenamiento a MinIO, y configura los buckets con acceso de lectura pública para que Spark los descargue por HTTP:
-
-```bash
-docker exec spark-master python3 /app/setup_minio_distributed.py
-```
-
-Debe mostrar:
-```
-=== 1. Subiendo JAR de inferencia a MinIO ===
-  OK: .../flight_prediction_2.12-0.1.jar -> s3://models/flight_prediction_2.12-0.1.jar
-=== 2. Subiendo script de entrenamiento a MinIO ===
-  OK: .../train_spark_mllib_model.py -> s3://flight-data/scripts/train_spark_mllib_model.py
-=== 3. Haciendo bucket 'models' de lectura publica ===
-  OK: bucket 'models' set to public read
-=== 4. Haciendo bucket 'flight-data' de lectura publica ===
-  OK: bucket 'flight-data' set to public read
-```
-
-### Paso 4 — Crear tabla Iceberg en MinIO
-
-Convierte los datos de entrenamiento al formato Parquet/Iceberg en MinIO. Tarda varios minutos:
+Convierte los datos brutos (subidos a MinIO por `minio-init`) al formato Parquet/Iceberg. Tarda varios minutos:
 
 ```bash
 docker exec -u root spark-master /opt/spark/bin/spark-submit \
   --master spark://spark-master:7077 \
   --conf spark.driver.host=spark-master \
   --packages "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262" \
-  /app/resources/create_iceberg_table.py 2>&1 | grep -E "Filas|total|OK|ERROR"
+  http://minio:9000/flight-data/scripts/create_iceberg_table.py 2>&1 | grep -E "Filas|total|OK|ERROR"
 ```
 
 Debe terminar con:
@@ -150,13 +123,15 @@ Filas leidas: 457013
 OK - Tabla Iceberg creada en s3a://flight-data/iceberg/flight_features
 ```
 
-### Paso 5 — Entrenar el modelo con Airflow
+> **Nota:** el script se lee directamente desde MinIO (`http://minio:9000/flight-data/scripts/...`), sin acceso a disco local.
+
+### Paso 2 — Entrenar el modelo con Airflow
 
 1. Abre **Airflow** en `http://localhost:8081` (usuario: `admin`, contraseña: `admin`)
 2. Activa el DAG `agile_data_science_batch_prediction_model_training`
 3. Pulsa el botón **Trigger DAG** (▶)
 4. Espera a que las 3 tareas estén en verde (~10-15 minutos):
-   - `check_spark` — verifica que el cluster Spark funciona
+   - `check_spark` — verifica que el clúster Spark funciona
    - `train_model` — entrena el Random Forest y guarda los modelos **exclusivamente en MinIO**
    - `register_mlflow` — verifica las métricas en MLflow
 
@@ -164,7 +139,7 @@ Una vez completado, los modelos quedan en `s3a://models/` y las métricas en MLf
 
 ### Verificar el modo distribuido
 
-Comprueba en la **Spark Master UI** (`http://localhost:8080`) que el job de inferencia aparece bajo **Drivers** (no bajo Applications). Esto confirma que el driver corre en el cluster con `--deploy-mode cluster`.
+Comprueba en la **Spark Master UI** (`http://localhost:8080`) que el job de inferencia aparece bajo **Drivers** (no bajo Applications). Esto confirma que el driver corre en el clúster con `--deploy-mode cluster`.
 
 ```bash
 docker compose logs spark-job --tail 20
@@ -193,13 +168,6 @@ Una vez que Kibana esté disponible en `http://localhost:5601`:
 2. Ve a `http://localhost:5601/app/discover`
 3. Selecciona el Data View `flight-predictions`
 4. Verás cada predicción como un documento con los campos: `Carrier`, `Origin`, `Dest`, `Distance`, `DepDelay`
-
-### Crear un dashboard
-
-En Kibana → **Dashboards → Create dashboard** puedes añadir visualizaciones como:
-- Histograma de predicciones por aerolínea (`Carrier`)
-- Mapa de calor de rutas con más retrasos (`Origin` → `Dest`)
-- Serie temporal de predicciones por minuto
 
 ---
 
@@ -247,30 +215,65 @@ Abre el navegador en `http://localhost:5001/flights/delays/predict_kafka`, relle
 
 ---
 
-## Despliegue en Google Cloud (GCP)
+## Despliegue en Kubernetes
 
-Esta sección explica cómo crear una VM en GCP desde cero, instalar Docker y desplegar el sistema completo.
+### Docker Desktop
+
+Activa Kubernetes en Docker Desktop (**Settings → Kubernetes → Enable Kubernetes**), luego:
+
+```bash
+bash k8s/deploy.sh
+```
+
+El script construye las imágenes, aplica todos los manifiestos y sube los artefactos a MinIO. Los servicios quedan accesibles en:
+
+| Servicio         | URL                          |
+|------------------|------------------------------|
+| Flask            | http://localhost:30501       |
+| Airflow          | http://localhost:30808       |
+| MLflow           | http://localhost:30500       |
+| Spark UI         | http://localhost:30080       |
+| MinIO Console    | http://localhost:30901       |
+| Kibana           | http://localhost:30561       |
+
+### Google Kubernetes Engine (GKE)
+
+```bash
+bash k8s/deploy-gke.sh <PROJECT_ID> [ZONE]
+# Ejemplo:
+bash k8s/deploy-gke.sh mi-proyecto-gcp europe-west1-b
+```
+
+El script:
+1. Crea un clúster GKE (`e2-standard-4 × 3`, autoescalado 2-5 nodos)
+2. Construye y sube las imágenes a Google Container Registry
+3. Aplica todos los manifiestos Kubernetes
+4. Expone los servicios con LoadBalancer
+5. Sube el JAR, el script y los datos brutos a MinIO
+
+Para obtener las IPs externas una vez desplegado:
+```bash
+kubectl get svc -n flight-prediction
+```
+
+Para eliminar el clúster y evitar costes:
+```bash
+gcloud container clusters delete flight-prediction-cluster --zone=europe-west1-b
+```
 
 ---
 
+## Despliegue en Google Cloud VM (Docker Compose)
+
 ### Paso 1 — Instalar Google Cloud SDK en tu máquina local
 
-Si no tienes `gcloud` instalado:
-
 ```bash
-# Linux / WSL
 curl https://sdk.cloud.google.com | bash
 exec -l $SHELL
 gcloud init
 ```
 
-Durante `gcloud init` te pedirá que inicies sesión con tu cuenta de Google y que selecciones el proyecto de GCP.
-
----
-
-### Paso 2 — Crear la VM desde cero
-
-Ejecuta esto desde tu máquina local. Crea una VM con 16 GB de RAM y 50 GB de disco:
+### Paso 2 — Crear la VM
 
 ```bash
 gcloud compute instances create big-data-vm \
@@ -283,13 +286,7 @@ gcloud compute instances create big-data-vm \
   --tags=bigdata
 ```
 
-> `e2-standard-4` = 4 vCPUs y 16 GB de RAM. Mínimo recomendado para este sistema.
-
----
-
-### Paso 3 — Abrir los puertos en el firewall de GCP
-
-Ejecuta desde tu máquina local (no desde la VM):
+### Paso 3 — Abrir puertos en el firewall
 
 ```bash
 gcloud compute firewall-rules create bigdata-ports \
@@ -299,18 +296,13 @@ gcloud compute firewall-rules create bigdata-ports \
   --target-tags=bigdata
 ```
 
-Esto abre los puertos de Flask, Airflow, MLflow, Spark, MinIO y Kibana al exterior.
-
----
-
-### Paso 4 — Conectarse a la VM e instalar Docker
+### Paso 4 — Conectarse e instalar Docker
 
 ```bash
-# Conectarse a la VM
 gcloud compute ssh big-data-vm --zone=europe-west1-b
 ```
 
-Una vez dentro de la VM, instalar Docker:
+Dentro de la VM:
 
 ```bash
 sudo apt-get update && sudo apt-get upgrade -y
@@ -326,60 +318,31 @@ sudo apt-get update
 sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 sudo usermod -aG docker $USER
 newgrp docker
-docker --version
-docker compose version
 ```
 
----
+### Paso 5 — Subir el proyecto y arrancar
 
-### Paso 5 — Subir el proyecto a la VM
-
-Desde tu **máquina local**, empaquetar el proyecto y subirlo:
+Desde tu **máquina local**:
 
 ```bash
-cd ~
 tar --exclude='practica_creativa/env' \
-    --exclude='practica_creativa/y' \
     --exclude='practica_creativa/.git' \
-    --exclude='practica_creativa/spark-warehouse' \
     --exclude='practica_creativa/logs' \
     --exclude='practica_creativa/mlflow' \
     --exclude='practica_creativa/models' \
     -czf practica.tar.gz practica_creativa/
-
 gcloud compute scp practica.tar.gz big-data-vm:~ --zone=europe-west1-b
 ```
 
-En la **VM**, descomprimir:
+Dentro de la VM:
 
 ```bash
 tar -xzf practica.tar.gz
 cd practica_creativa
-```
-
----
-
-### Paso 6 — Levantar el sistema
-
-```bash
 docker compose up -d --build
 ```
 
-Espera 3-4 minutos y comprueba que todos los contenedores están arriba:
-
-```bash
-docker compose ps
-```
-
----
-
-### Paso 7 — Configuración inicial (igual que en local)
-
-Sigue los mismos pasos de la sección **Configuración inicial** de este README: crear buckets en MinIO, importar distancias en Cassandra, configurar MinIO distribuido, crear tabla Iceberg y entrenar el modelo con Airflow.
-
----
-
-### Paso 8 — Obtener la IP externa y acceder
+### Paso 6 — Obtener la IP externa
 
 ```bash
 gcloud compute instances describe big-data-vm \
@@ -387,31 +350,23 @@ gcloud compute instances describe big-data-vm \
   --format='get(networkInterfaces[0].accessConfigs[0].natIP)'
 ```
 
-Sustituye `IP_EXTERNA` por la IP obtenida:
-
 | Servicio      | URL                         | Credenciales            |
 |---------------|-----------------------------|-------------------------|
-| Flask (web)   | http://IP_EXTERNA:5001      | —                       |
+| Flask         | http://IP_EXTERNA:5001      | —                       |
 | Airflow       | http://IP_EXTERNA:8081      | admin / admin           |
 | MLflow        | http://IP_EXTERNA:5000      | —                       |
 | Spark UI      | http://IP_EXTERNA:8080      | —                       |
 | MinIO Console | http://IP_EXTERNA:9001      | minioadmin / minioadmin |
 | Kibana        | http://IP_EXTERNA:5601      | —                       |
 
----
-
-### Paso 9 — Arrancar y parar la VM
+### Arrancar y parar la VM
 
 ```bash
-# Arrancar la VM (desde local)
 gcloud compute instances start big-data-vm --zone=europe-west1-b
-
-# Parar la VM cuando no la uses (evita costes)
 gcloud compute instances stop big-data-vm --zone=europe-west1-b
 ```
 
-> Parar la VM detiene el cobro por cómputo. Los datos del disco persisten.
-> Cuando la vuelvas a arrancar, solo necesitas `docker compose up -d` dentro de la VM.
+> Parar la VM detiene el cobro por cómputo. Los datos del disco persisten. Al volver a arrancar solo hace falta `docker compose up -d`.
 
 ---
 

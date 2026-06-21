@@ -1,15 +1,21 @@
 """
 Setup distribuido de MinIO:
-- Hace el bucket 'models' de lectura pública (para que Spark descargue el JAR por HTTP)
 - Sube el JAR de inferencia a s3://models/
 - Sube el script de entrenamiento a s3://flight-data/scripts/
-Ejecutar desde spark-master: docker exec spark-master python3 /app/setup_minio_distributed.py
+- Sube los datos brutos a s3://flight-data/raw/
+- Hace los buckets de lectura pública para que Spark los descargue via HTTP
+
+Variables de entorno configurables:
+  MINIO_ENDPOINT  (default: minio:9000)
+  MINIO_ACCESS_KEY / MINIO_SECRET_KEY
+  JAR_PATH, SCRIPT_PATH, DATA_PATH  (paths locales a los archivos)
+  REPO_ROOT  (alternativa: prefijo base para las rutas por defecto)
 """
 import hashlib, hmac, datetime, http.client, json, os
 
-ACCESS_KEY = "minioadmin"
-SECRET_KEY = "minioadmin"
-ENDPOINT   = "minio:9000"
+ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", "minioadmin")
+SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "minioadmin")
+ENDPOINT   = os.environ.get("MINIO_ENDPOINT", "minio:9000")
 REGION     = "us-east-1"
 
 def sign(key, msg):
@@ -89,25 +95,32 @@ def set_bucket_public_read(bucket):
     else:
         print(f"  ERROR {resp.status}: setting bucket policy on '{bucket}'")
 
-BASE = "/app"
+_base = os.environ.get("REPO_ROOT", "/app")
+JAR_PATH           = os.environ.get("JAR_PATH",           f"{_base}/flight_prediction/target/scala-2.12/flight_prediction_2.12-0.1.jar")
+SCRIPT_PATH        = os.environ.get("SCRIPT_PATH",        f"{_base}/resources/train_spark_mllib_model.py")
+ICEBERG_SCRIPT_PATH= os.environ.get("ICEBERG_SCRIPT_PATH",f"{_base}/resources/create_iceberg_table.py")
+DATA_PATH          = os.environ.get("DATA_PATH",          f"{_base}/data/simple_flight_delay_features.jsonl.bz2")
+
 print("=== 1. Subiendo JAR de inferencia a MinIO ===")
-upload_file(
-    f"{BASE}/flight_prediction/target/scala-2.12/flight_prediction_2.12-0.1.jar",
-    "models", "flight_prediction_2.12-0.1.jar"
-)
+upload_file(JAR_PATH, "models", "flight_prediction_2.12-0.1.jar")
 
 print("\n=== 2. Subiendo script de entrenamiento a MinIO ===")
-upload_file(
-    f"{BASE}/resources/train_spark_mllib_model.py",
-    "flight-data", "scripts/train_spark_mllib_model.py"
-)
+upload_file(SCRIPT_PATH, "flight-data", "scripts/train_spark_mllib_model.py")
 
-print("\n=== 3. Haciendo bucket 'models' de lectura publica ===")
+print("\n=== 3. Subiendo script de creacion de tabla Iceberg a MinIO ===")
+upload_file(ICEBERG_SCRIPT_PATH, "flight-data", "scripts/create_iceberg_table.py")
+
+print("\n=== 4. Subiendo datos de entrenamiento a MinIO ===")
+upload_file(DATA_PATH, "flight-data", "raw/simple_flight_delay_features.jsonl.bz2")
+
+print("\n=== 4. Haciendo bucket 'models' de lectura publica ===")
 set_bucket_public_read("models")
 
-print("\n=== 4. Haciendo bucket 'flight-data' de lectura publica ===")
+print("\n=== 5. Haciendo bucket 'flight-data' de lectura publica ===")
 set_bucket_public_read("flight-data")
 
-print("\nDone. Spark puede descargar el JAR via:")
+print("\nDone. Recursos disponibles en MinIO:")
 print("  http://minio:9000/models/flight_prediction_2.12-0.1.jar")
 print("  http://minio:9000/flight-data/scripts/train_spark_mllib_model.py")
+print("  http://minio:9000/flight-data/scripts/create_iceberg_table.py")
+print("  s3a://flight-data/raw/simple_flight_delay_features.jsonl.bz2")

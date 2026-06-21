@@ -10,8 +10,6 @@ from pyspark.sql.types import *
 MINIO_ENDPOINT = "http://minio:9000"
 MINIO_ACCESS   = "minioadmin"
 MINIO_SECRET   = "minioadmin"
-BASE_PATH      = "/app"
-
 spark = SparkSession.builder \
     .appName("CreateIcebergTable") \
     .master("spark://spark-master:7077") \
@@ -50,8 +48,8 @@ schema = StructType([
     StructField("Origin",     StringType(),    True),
 ])
 
-print("Leyendo datos locales...")
-input_path = "{}/data/simple_flight_delay_features.jsonl.bz2".format(BASE_PATH)
+print("Leyendo datos desde MinIO...")
+input_path = "s3a://flight-data/raw/simple_flight_delay_features.jsonl.bz2"
 df = spark.read.json(input_path, schema=schema)
 count = df.count()
 print(f"Filas leidas: {count}")

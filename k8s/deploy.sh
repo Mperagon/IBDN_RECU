@@ -80,42 +80,24 @@ kubectl exec -n $NAMESPACE $MINIO_POD -- sh -c "
 "
 
 echo ""
-echo "=== 4. Subiendo JAR y script a MinIO ==="
+echo "=== 4. Subiendo JAR, script y datos a MinIO ==="
 SPARK_POD=$(kubectl get pod -l app=spark-master -n $NAMESPACE -o jsonpath='{.items[0].metadata.name}')
 kubectl cp "$REPO_ROOT/flight_prediction/target/scala-2.12/flight_prediction_2.12-0.1.jar" \
   "$NAMESPACE/$SPARK_POD:/tmp/flight_prediction_2.12-0.1.jar"
 kubectl cp "$REPO_ROOT/resources/train_spark_mllib_model.py" \
   "$NAMESPACE/$SPARK_POD:/tmp/train_spark_mllib_model.py"
-kubectl exec -n $NAMESPACE $SPARK_POD -- python3 /tmp/setup_minio_distributed.py 2>/dev/null || \
-kubectl exec -n $NAMESPACE $SPARK_POD -- sh -c "
-  python3 -c \"
-import http.client, hashlib, hmac, datetime, json
-
-def req(method, bucket, key, body=b''):
-    now = datetime.datetime.utcnow()
-    amz = now.strftime('%Y%m%dT%H%M%SZ')
-    ds  = now.strftime('%Y%m%d')
-    ph  = hashlib.sha256(body).hexdigest()
-    uri = f'/{bucket}/{key}'
-    ch  = f'host:minio:9000\nx-amz-content-sha256:{ph}\nx-amz-date:{amz}\n'
-    sh  = 'host;x-amz-content-sha256;x-amz-date'
-    cr  = f'PUT\n{uri}\n\n{ch}\n{sh}\n{ph}'
-    cs  = f'{ds}/us-east-1/s3/aws4_request'
-    sts = f'AWS4-HMAC-SHA256\n{amz}\n{cs}\n' + hashlib.sha256(cr.encode()).hexdigest()
-    def sign(k, m): return hmac.new(k, m.encode(), hashlib.sha256).digest()
-    sk = sign(sign(sign(sign(b'AWS4minioadmin', ds), 'us-east-1'), 's3'), 'aws4_request')
-    sig = hmac.new(sk, sts.encode(), hashlib.sha256).hexdigest()
-    auth = f'AWS4-HMAC-SHA256 Credential=minioadmin/{cs}, SignedHeaders={sh}, Signature={sig}'
-    c = http.client.HTTPConnection('minio:9000')
-    c.request(method, uri, body=body, headers={'Host':'minio:9000','x-amz-date':amz,'x-amz-content-sha256':ph,'Authorization':auth,'Content-Length':str(len(body))})
-    r = c.getresponse(); r.read(); c.close(); return r.status
-
-with open('/tmp/flight_prediction_2.12-0.1.jar','rb') as f: b=f.read()
-print('JAR:', req('PUT','models','flight_prediction_2.12-0.1.jar',b))
-with open('/tmp/train_spark_mllib_model.py','rb') as f: b=f.read()
-print('Script:', req('PUT','flight-data','scripts/train_spark_mllib_model.py',b))
-\"
-"
+kubectl cp "$REPO_ROOT/resources/create_iceberg_table.py" \
+  "$NAMESPACE/$SPARK_POD:/tmp/create_iceberg_table.py"
+kubectl cp "$REPO_ROOT/data/simple_flight_delay_features.jsonl.bz2" \
+  "$NAMESPACE/$SPARK_POD:/tmp/raw.jsonl.bz2"
+kubectl cp "$REPO_ROOT/setup_minio_distributed.py" \
+  "$NAMESPACE/$SPARK_POD:/tmp/setup_minio_distributed.py"
+kubectl exec -n $NAMESPACE $SPARK_POD -- \
+  env JAR_PATH=/tmp/flight_prediction_2.12-0.1.jar \
+      SCRIPT_PATH=/tmp/train_spark_mllib_model.py \
+      ICEBERG_SCRIPT_PATH=/tmp/create_iceberg_table.py \
+      DATA_PATH=/tmp/raw.jsonl.bz2 \
+  python3 /tmp/setup_minio_distributed.py
 
 echo ""
 echo "=== Despliegue completado ==="

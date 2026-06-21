@@ -121,15 +121,24 @@ kubectl exec -n $NAMESPACE $MINIO_POD -- sh -c "
 "
 
 echo ""
-echo "=== 6. Subiendo JAR y script a MinIO ==="
+echo "=== 6. Subiendo JAR, script y datos a MinIO ==="
 SPARK_POD=$(kubectl get pod -l app=spark-master -n $NAMESPACE -o jsonpath='{.items[0].metadata.name}')
 kubectl cp "$REPO_ROOT/flight_prediction/target/scala-2.12/flight_prediction_2.12-0.1.jar" \
   "$NAMESPACE/$SPARK_POD:/tmp/flight_prediction_2.12-0.1.jar"
 kubectl cp "$REPO_ROOT/resources/train_spark_mllib_model.py" \
   "$NAMESPACE/$SPARK_POD:/tmp/train_spark_mllib_model.py"
+kubectl cp "$REPO_ROOT/resources/create_iceberg_table.py" \
+  "$NAMESPACE/$SPARK_POD:/tmp/create_iceberg_table.py"
+kubectl cp "$REPO_ROOT/data/simple_flight_delay_features.jsonl.bz2" \
+  "$NAMESPACE/$SPARK_POD:/tmp/raw.jsonl.bz2"
 kubectl cp "$REPO_ROOT/setup_minio_distributed.py" \
   "$NAMESPACE/$SPARK_POD:/tmp/setup_minio_distributed.py"
-kubectl exec -n $NAMESPACE $SPARK_POD -- python3 /tmp/setup_minio_distributed.py
+kubectl exec -n $NAMESPACE $SPARK_POD -- \
+  env JAR_PATH=/tmp/flight_prediction_2.12-0.1.jar \
+      SCRIPT_PATH=/tmp/train_spark_mllib_model.py \
+      ICEBERG_SCRIPT_PATH=/tmp/create_iceberg_table.py \
+      DATA_PATH=/tmp/raw.jsonl.bz2 \
+  python3 /tmp/setup_minio_distributed.py
 
 # ─── 7. IPs externas ─────────────────────────────────────────────────────────
 echo ""

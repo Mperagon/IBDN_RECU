@@ -14,7 +14,7 @@ import predict_utils
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
-client = MongoClient()
+client = MongoClient(os.environ.get('MONGO_HOST', 'localhost'))
 
 # Cassandra session for distance lookups and prediction storage
 cassandra_cluster, cassandra_session = predict_utils.get_cassandra_session()
