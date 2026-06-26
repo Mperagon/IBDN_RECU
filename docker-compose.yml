@@ -66,29 +66,11 @@ services:
       - bigdata-net
     volumes:
       - ./data/origin_dest_distances.jsonl:/data/origin_dest_distances.jsonl:ro
+      - ./resources/cassandra_data_init.py:/app/cassandra_data_init.py:ro
     environment:
       - CASSANDRA_HOST=cassandra
       - PROJECT_HOME=/app
-    command: >
-      python3 -c "
-import json, os, time
-from cassandra.cluster import Cluster
-host = os.environ.get('CASSANDRA_HOST', 'cassandra')
-for _ in range(10):
-    try:
-        cluster = Cluster([host])
-        session = cluster.connect('flight_data')
-        break
-    except Exception:
-        time.sleep(5)
-stmt = session.prepare('INSERT INTO origin_dest_distances (origin, dest, distance) VALUES (?, ?, ?)')
-with open('/data/origin_dest_distances.jsonl') as f:
-    for line in f:
-        r = json.loads(line)
-        session.execute(stmt, (r['Origin'], r['Dest'], float(r['Distance'])))
-print('Distancias importadas OK')
-cluster.shutdown()
-"
+    command: python3 /app/cassandra_data_init.py
     depends_on:
       cassandra-init:
         condition: service_completed_successfully

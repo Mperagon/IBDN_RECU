@@ -17,7 +17,6 @@ object MakePrediction {
     val spark = SparkSession
       .builder
       .appName("StructuredNetworkWordCount")
-      .master(sys.env.getOrElse("SPARK_MASTER", "local[*]"))
       .config("spark.hadoop.fs.s3a.endpoint",              minioEndpoint)
       .config("spark.hadoop.fs.s3a.access.key",            minioAccess)
       .config("spark.hadoop.fs.s3a.secret.key",            minioSecret)
