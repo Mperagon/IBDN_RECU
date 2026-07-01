@@ -11,7 +11,7 @@ echo "=== Verificando contexto kubectl ==="
 kubectl config current-context
 kubectl cluster-info --request-timeout=5s
 
-IMAGE_PREFIX="flight-prediction/"
+export IMAGE_PREFIX="flight-prediction/"
 
 echo ""
 echo "=== 1. Construyendo imágenes custom ==="
@@ -83,6 +83,8 @@ kubectl exec -n $NAMESPACE $MINIO_POD -- sh -c "
 
 echo ""
 echo "=== 4. Subiendo JAR, script y datos a MinIO ==="
+echo "  → Esperando Spark Master..."
+kubectl wait --for=condition=ready pod -l app=spark-master -n $NAMESPACE --timeout=120s
 SPARK_POD=$(kubectl get pod -l app=spark-master -n $NAMESPACE -o jsonpath='{.items[0].metadata.name}')
 kubectl cp "$REPO_ROOT/flight_prediction/target/scala-2.12/flight_prediction_2.12-0.1.jar" \
   "$NAMESPACE/$SPARK_POD:/tmp/flight_prediction_2.12-0.1.jar"

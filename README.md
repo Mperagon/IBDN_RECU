@@ -274,10 +274,9 @@ Una vez el script haya terminado, crea la tabla Iceberg ejecutando:
 ```bash
 SPARK_POD=$(kubectl get pod -l app=spark-master -n flight-prediction -o jsonpath='{.items[0].metadata.name}')
 kubectl exec -n flight-prediction $SPARK_POD -- bash -c '
+export SPARK_DRIVER_HOST=$(hostname -i)
 /opt/spark/bin/spark-submit \
   --master spark://spark-master:7077 \
-  --conf "spark.driver.host=$(hostname -i)" \
-  --conf spark.driver.bindAddress=0.0.0.0 \
   --conf spark.executor.memory=512m \
   --conf spark.executor.memoryOverhead=128m \
   --packages "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262" \

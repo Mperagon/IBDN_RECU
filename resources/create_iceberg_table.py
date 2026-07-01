@@ -10,10 +10,14 @@ from pyspark.sql.types import *
 MINIO_ENDPOINT = "http://minio:9000"
 MINIO_ACCESS   = "minioadmin"
 MINIO_SECRET   = "minioadmin"
+# En K8s el driver corre en el pod de spark-master: usamos su IP para que
+# los executors puedan conectar de vuelta. En Docker Compose basta el hostname.
+driver_host = os.environ.get("SPARK_DRIVER_HOST", "spark-master")
 spark = SparkSession.builder \
     .appName("CreateIcebergTable") \
     .master("spark://spark-master:7077") \
-    .config("spark.driver.host", "spark-master") \
+    .config("spark.driver.host", driver_host) \
+    .config("spark.driver.bindAddress", "0.0.0.0") \
     .config("spark.sql.extensions",
             "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
     .config("spark.sql.catalog.minio_catalog",
