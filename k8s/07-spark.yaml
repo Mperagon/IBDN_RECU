@@ -72,6 +72,25 @@ spec:
       targetPort: 7077
   type: NodePort
 ---
+# Headless service: DNS resuelve directamente a la IP del pod (igual que Docker Compose)
+# Así spark-submit puede usar --conf spark.driver.host=spark-master sin IP lookup manual
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-master-headless
+  namespace: flight-prediction
+spec:
+  clusterIP: None
+  selector:
+    app: spark-master
+  ports:
+    - name: rpc
+      port: 7077
+      targetPort: 7077
+    - name: driver
+      port: 4040
+      targetPort: 4040
+---
 # Spark Worker 1
 apiVersion: apps/v1
 kind: Deployment
