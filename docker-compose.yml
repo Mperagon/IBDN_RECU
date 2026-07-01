@@ -419,7 +419,7 @@ services:
       - AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags
       - MLFLOW_TRACKING_URI=http://mlflow:5000
     volumes:
-      - ./resources/airflow:/opt/airflow/dags
+      - ./resources/airflow/setup.py:/opt/airflow/dags/setup.py
       - /var/run/docker.sock:/var/run/docker.sock
     command: airflow webserver --port 8080
     depends_on:
@@ -479,7 +479,7 @@ services:
       - MLFLOW_TRACKING_URI=http://mlflow:5000
       - AIRFLOW__SCHEDULER__SCHEDULER_HEARTBEAT_SEC=30
     volumes:
-      - ./resources/airflow:/opt/airflow/dags
+      - ./resources/airflow/setup.py:/opt/airflow/dags/setup.py
       - /var/run/docker.sock:/var/run/docker.sock
     command: airflow scheduler
     depends_on:

@@ -58,7 +58,7 @@ apply_manifest "$REPO_ROOT/k8s/09-mlflow.yaml"
 
 echo "  → Airflow..."
 kubectl create configmap airflow-dags \
-  --from-file=setup_k8s.py="$REPO_ROOT/resources/airflow/setup_k8s.py.disabled" \
+  --from-file=setup_k8s.py="$REPO_ROOT/resources/airflow/setup_k8s.py" \
   -n $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
 kubectl delete job airflow-init -n $NAMESPACE --ignore-not-found
 apply_manifest "$REPO_ROOT/k8s/11-airflow.yaml"

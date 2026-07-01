@@ -21,7 +21,14 @@ IVY2_VOLUME = k8s.V1Volume(
     name="ivy2",
     persistent_volume_claim=k8s.V1PersistentVolumeClaimVolumeSource(claim_name="ivy2-cache")
 )
-IVY2_MOUNT = k8s.V1VolumeMount(name="ivy2", mount_path="/root/.ivy2")
+IVY2_MOUNT = k8s.V1VolumeMount(name="ivy2", mount_path="/home/spark/.ivy2")
+
+POD_IP_ENV = k8s.V1EnvVar(
+    name="SPARK_DRIVER_HOST",
+    value_from=k8s.V1EnvVarSource(
+        field_ref=k8s.V1ObjectFieldSelector(field_path="status.podIP")
+    )
+)
 
 default_args = {
     "owner": "airflow",
@@ -43,12 +50,15 @@ check_spark = KubernetesPodOperator(
     name="spark-pi-check",
     namespace=NAMESPACE,
     image="apache/spark:3.5.3",
-    cmds=["/opt/spark/bin/spark-submit"],
+    cmds=["bash", "-c"],
     arguments=[
-        "--master", "spark://spark-master:7077",
-        "--conf", "spark.driver.host=check-spark-pod",
-        "--class", "org.apache.spark.examples.SparkPi",
-        "/opt/spark/examples/jars/spark-examples_2.12-3.5.3.jar", "2"
+        "DRIVER_IP=$(hostname -i | awk '{print $1}') && "
+        "/opt/spark/bin/spark-submit "
+        "--master spark://spark-master:7077 "
+        "--conf spark.driver.host=$DRIVER_IP "
+        "--conf spark.driver.bindAddress=0.0.0.0 "
+        "--class org.apache.spark.examples.SparkPi "
+        "/opt/spark/examples/jars/spark-examples_2.12-3.5.3.jar 2"
     ],
     volumes=[IVY2_VOLUME],
     volume_mounts=[IVY2_MOUNT],
@@ -63,17 +73,20 @@ train_model = KubernetesPodOperator(
     name="spark-train-model",
     namespace=NAMESPACE,
     image="apache/spark:3.5.3",
-    cmds=["/opt/spark/bin/spark-submit"],
+    cmds=["bash", "-c"],
     arguments=[
-        "--master", "spark://spark-master:7077",
-        "--conf", "spark.driver.host=train-model-pod",
-        "--packages",
-        "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,"
+        "pip install numpy mlflow boto3 --quiet --no-cache-dir -t /tmp/pylibs && "
+        "export PYTHONPATH=/tmp/pylibs && "
+        "/opt/spark/bin/spark-submit "
+        "--master spark://spark-master:7077 "
+        "--conf spark.driver.host=$SPARK_DRIVER_HOST "
+        "--conf spark.driver.bindAddress=0.0.0.0 "
+        "--packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,"
         "org.apache.hadoop:hadoop-aws:3.3.4,"
-        "com.amazonaws:aws-java-sdk-bundle:1.12.262",
+        "com.amazonaws:aws-java-sdk-bundle:1.12.262 "
         "http://minio:9000/flight-data/scripts/train_spark_mllib_model.py"
     ],
-    env_vars=MINIO_ENV,
+    env_vars=MINIO_ENV + [POD_IP_ENV],
     volumes=[IVY2_VOLUME],
     volume_mounts=[IVY2_MOUNT],
     get_logs=True,
@@ -87,7 +100,7 @@ register_mlflow = KubernetesPodOperator(
     name="mlflow-verify",
     namespace=NAMESPACE,
     image="flight-prediction/mlflow:latest",
-    image_pull_policy="Never",
+    image_pull_policy="IfNotPresent",
     cmds=["python3", "-c"],
     arguments=["""
 import mlflow, sys
