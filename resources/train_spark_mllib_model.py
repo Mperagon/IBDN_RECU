@@ -37,10 +37,14 @@ def main(base_path):
         import pyspark
         import pyspark.sql
 
-        spark = pyspark.sql.SparkSession.builder \
+        _driver_host = os.environ.get("SPARK_DRIVER_HOST")
+        _b = pyspark.sql.SparkSession.builder \
             .appName(APP_NAME) \
-            .master("spark://spark-master:7077") \
-            .config("spark.driver.host", os.environ.get("SPARK_DRIVER_HOST", "spark-master")) \
+            .master("spark://spark-master:7077")
+        if _driver_host:
+            _b = _b.config("spark.driver.host", _driver_host) \
+                   .config("spark.driver.bindAddress", "0.0.0.0")
+        spark = _b \
             .config("spark.sql.extensions",
                     "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
             .config("spark.sql.catalog.minio_catalog",
@@ -146,7 +150,7 @@ def main(base_path):
 
     # MLflow tracking
     import mlflow
-    mlflow_uri = os.environ.get('MLFLOW_TRACKING_URI', 'http://localhost:5000')
+    mlflow_uri = os.environ.get('MLFLOW_TRACKING_URI', 'http://mlflow:5000')
     mlflow.set_tracking_uri(mlflow_uri)
     mlflow.set_experiment("flight_delay_prediction")
     with mlflow.start_run():

@@ -25,7 +25,7 @@ check_spark = BashOperator(
     bash_command="""
 docker exec spark-master /opt/spark/bin/spark-submit \
   --master spark://spark-master:7077 \
-  --conf spark.driver.host=spark-master \
+  --deploy-mode cluster \
   --class org.apache.spark.examples.SparkPi \
   /opt/spark/examples/jars/spark-examples_2.12-3.5.3.jar 2
 """,
@@ -37,12 +37,10 @@ train_model = BashOperator(
     task_id='train_model',
     bash_command="""
 docker exec -u root spark-master bash -c "pip install --quiet mlflow scikit-learn pandas boto3 2>/dev/null; exit 0" || true
-docker exec -u root \
-  -e MLFLOW_TRACKING_URI=http://mlflow:5000 \
-  spark-master \
+docker exec -u root spark-master \
   /opt/spark/bin/spark-submit \
   --master spark://spark-master:7077 \
-  --conf spark.driver.host=spark-master \
+  --deploy-mode cluster \
   --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262 \
   http://minio:9000/flight-data/scripts/train_spark_mllib_model.py
 """,
