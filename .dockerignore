@@ -2,6 +2,8 @@ data/
 models/
 logs/
 .git/
+env/
+y/
 __pycache__/
 *.pyc
 *.pyo

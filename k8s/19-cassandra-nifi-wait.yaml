@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nifi-wait-script
+  namespace: flight-prediction
+data:
+  wait_for_data.py: |
+    import os, time
+    from cassandra.cluster import Cluster
+    CASSANDRA_HOST = os.environ.get("CASSANDRA_HOST", "cassandra")
+    MAX_ATTEMPTS = 60
+    cluster = None
+    for attempt in range(MAX_ATTEMPTS):
+        try:
+            if cluster is None:
+                cluster = Cluster([CASSANDRA_HOST])
+            session = cluster.connect("flight_data")
+            count = session.execute("SELECT COUNT(*) FROM origin_dest_distances").one()[0]
+            if count > 0:
+                print(f"OK: {count} distancias cargadas en Cassandra por NiFi")
+                cluster.shutdown()
+                break
+            print(f"Esperando NiFi... ({attempt+1}/{MAX_ATTEMPTS}, registros: {count})")
+        except Exception as e:
+            print(f"Esperando Cassandra/NiFi... ({attempt+1}/{MAX_ATTEMPTS}): {e}")
+            cluster = None
+        time.sleep(10)
+    else:
+        raise RuntimeError("NiFi no cargo las distancias en el tiempo esperado")
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cassandra-nifi-wait
+  namespace: flight-prediction
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: wait
+          image: python:3.12-slim
+          command:
+            - sh
+            - -c
+            - pip install cassandra-driver -q && python3 /app/wait_for_data.py
+          env:
+            - name: CASSANDRA_HOST
+              value: cassandra
+          volumeMounts:
+            - name: wait-script
+              mountPath: /app
+      volumes:
+        - name: wait-script
+          configMap:
+            name: nifi-wait-script

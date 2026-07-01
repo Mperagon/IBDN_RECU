@@ -75,5 +75,4 @@ spec:
     - name: console
       port: 9001
       targetPort: 9001
-      nodePort: 30901
-  type: NodePort
+  type: LoadBalancer

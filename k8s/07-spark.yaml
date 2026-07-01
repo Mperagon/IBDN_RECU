@@ -1,3 +1,15 @@
+# PVC compartida para caché de dependencias Maven/Ivy (usada por Spark y Airflow DAG)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ivy2-cache
+  namespace: flight-prediction
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
 # Spark Master
 apiVersion: apps/v1
 kind: Deployment
@@ -14,6 +26,9 @@ spec:
       labels:
         app: spark-master
     spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 0
       containers:
         - name: spark-master
           image: apache/spark:3.5.3
@@ -24,10 +39,14 @@ spec:
           env:
             - name: SPARK_MODE
               value: master
+            - name: SPARK_MASTER_PORT
+              value: "7077"
+            - name: SPARK_MASTER_WEBUI_PORT
+              value: "8080"
           resources:
             requests:
-              memory: 1Gi
-              cpu: 500m
+              memory: 512Mi
+              cpu: 200m
           volumeMounts:
             - name: ivy2
               mountPath: /root/.ivy2
@@ -69,6 +88,9 @@ spec:
       labels:
         app: spark-worker-1
     spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 0
       containers:
         - name: spark-worker
           image: apache/spark:3.5.3
@@ -76,10 +98,14 @@ spec:
           env:
             - name: SPARK_MODE
               value: worker
+            - name: SPARK_WORKER_CORES
+              value: "2"
+            - name: SPARK_WORKER_MEMORY
+              value: "1g"
           resources:
             requests:
-              memory: 2Gi
-              cpu: 1000m
+              memory: 1Gi
+              cpu: "500m"
           volumeMounts:
             - name: ivy2
               mountPath: /root/.ivy2
@@ -103,6 +129,9 @@ spec:
       labels:
         app: spark-worker-2
     spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 0
       containers:
         - name: spark-worker
           image: apache/spark:3.5.3
@@ -110,70 +139,14 @@ spec:
           env:
             - name: SPARK_MODE
               value: worker
+            - name: SPARK_WORKER_CORES
+              value: "2"
+            - name: SPARK_WORKER_MEMORY
+              value: "1g"
           resources:
             requests:
-              memory: 2Gi
-              cpu: 1000m
-          volumeMounts:
-            - name: ivy2
-              mountPath: /root/.ivy2
-      volumes:
-        - name: ivy2
-          emptyDir: {}
----
-# Spark Streaming Job
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: spark-job
-  namespace: flight-prediction
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: spark-job
-  template:
-    metadata:
-      labels:
-        app: spark-job
-    spec:
-      containers:
-        - name: spark-job
-          image: apache/spark:3.5.3
-          command:
-            - /opt/spark/bin/spark-submit
-            - --class
-            - es.upm.dit.ging.predictor.MakePrediction
-            - --master
-            - spark://spark-master:7077
-            - --deploy-mode
-            - cluster
-            - --packages
-            - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262
-            - http://minio:9000/models/flight_prediction_2.12-0.1.jar
-          env:
-            - name: KAFKA_BROKER
-              value: kafka:9092
-            - name: SPARK_MASTER
-              value: spark://spark-master:7077
-            - name: MODELS_PATH
-              value: s3a://models
-            - name: MINIO_ENDPOINT
-              value: http://minio:9000
-            - name: MINIO_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: minio-credentials
-                  key: access-key
-            - name: MINIO_SECRET_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: minio-credentials
-                  key: secret-key
-          resources:
-            requests:
-              memory: 512Mi
-              cpu: 250m
+              memory: 1Gi
+              cpu: "500m"
           volumeMounts:
             - name: ivy2
               mountPath: /root/.ivy2

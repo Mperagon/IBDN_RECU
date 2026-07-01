@@ -4,13 +4,10 @@ metadata:
   name: airflow-env
   namespace: flight-prediction
 data:
-  AIRFLOW__CORE__EXECUTOR: KubernetesExecutor
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
   AIRFLOW__CORE__LOAD_EXAMPLES: "false"
   AIRFLOW__WEBSERVER__SECRET_KEY: mysecretkey
   AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
-  AIRFLOW__KUBERNETES__NAMESPACE: flight-prediction
-  AIRFLOW__KUBERNETES__WORKER_CONTAINER_REPOSITORY: apache/airflow
-  AIRFLOW__KUBERNETES__WORKER_CONTAINER_TAG: "2.9.1"
   MLFLOW_TRACKING_URI: http://mlflow:5000
 ---
 # Job de inicialización de Airflow
@@ -90,7 +87,8 @@ spec:
                 name: airflow-env
           volumeMounts:
             - name: dags
-              mountPath: /opt/airflow/dags
+              mountPath: /opt/airflow/dags/setup_k8s.py
+              subPath: setup_k8s.py
           resources:
             requests:
               memory: 1Gi
@@ -133,7 +131,8 @@ spec:
                 name: airflow-env
           volumeMounts:
             - name: dags
-              mountPath: /opt/airflow/dags
+              mountPath: /opt/airflow/dags/setup_k8s.py
+              subPath: setup_k8s.py
           resources:
             requests:
               memory: 1Gi
@@ -154,5 +153,4 @@ spec:
   ports:
     - port: 8080
       targetPort: 8080
-      nodePort: 30808
-  type: NodePort
+  type: LoadBalancer

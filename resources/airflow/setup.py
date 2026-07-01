@@ -36,7 +36,7 @@ docker exec spark-master /opt/spark/bin/spark-submit \
 train_model = BashOperator(
     task_id='train_model',
     bash_command="""
-docker exec -u root spark-master bash -c "pip install --quiet mlflow 2>/dev/null; exit 0" || true
+docker exec -u root spark-master bash -c "pip install --quiet mlflow scikit-learn pandas boto3 2>/dev/null; exit 0" || true
 docker exec -u root \
   -e MLFLOW_TRACKING_URI=http://mlflow:5000 \
   spark-master \
@@ -46,7 +46,7 @@ docker exec -u root \
   --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262 \
   http://minio:9000/flight-data/scripts/train_spark_mllib_model.py
 """,
-    execution_timeout=timedelta(minutes=50),
+    execution_timeout=timedelta(minutes=70),
     dag=training_dag,
 )
 

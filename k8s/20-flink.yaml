@@ -1,0 +1,141 @@
+# Flink JobManager
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flink-jobmanager
+  namespace: flight-prediction
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flink-jobmanager
+  template:
+    metadata:
+      labels:
+        app: flink-jobmanager
+    spec:
+      containers:
+        - name: flink-jobmanager
+          image: flink-custom:1.18.1
+          imagePullPolicy: Never
+          command: ["/opt/flink/bin/flink-daemon.sh", "start-foreground", "jobmanager"]
+          ports:
+            - containerPort: 8081
+            - containerPort: 6123
+          env:
+            - name: FLINK_PROPERTIES
+              value: |
+                jobmanager.rpc.address: flink-jobmanager
+                rest.port: 8081
+                python.executable: python3
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 200m
+          readinessProbe:
+            httpGet:
+              path: /overview
+              port: 8081
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flink-jobmanager
+  namespace: flight-prediction
+spec:
+  selector:
+    app: flink-jobmanager
+  ports:
+    - name: ui
+      port: 8081
+      targetPort: 8081
+      nodePort: 30082
+    - name: rpc
+      port: 6123
+      targetPort: 6123
+  type: NodePort
+---
+# Flink TaskManager
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flink-taskmanager
+  namespace: flight-prediction
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flink-taskmanager
+  template:
+    metadata:
+      labels:
+        app: flink-taskmanager
+    spec:
+      containers:
+        - name: flink-taskmanager
+          image: flink-custom:1.18.1
+          imagePullPolicy: Never
+          command: ["/opt/flink/bin/flink-daemon.sh", "start-foreground", "taskmanager"]
+          env:
+            - name: FLINK_PROPERTIES
+              value: |
+                jobmanager.rpc.address: flink-jobmanager
+                taskmanager.numberOfTaskSlots: 4
+                python.executable: python3
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 300m
+---
+# Flink Job submitter (one-shot)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: flink-job
+  namespace: flight-prediction
+spec:
+  backoffLimit: 5
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: flink-job
+          image: flink-custom:1.18.1
+          imagePullPolicy: Never
+          command:
+            - bash
+            - -c
+            - |
+              until curl -sf http://minio:9000/models/sklearn_flight_model.joblib -o /dev/null; do
+                echo 'Esperando modelo sklearn en MinIO...'
+                sleep 30
+              done
+              until curl -sf http://flink-jobmanager:8081/overview -o /dev/null; do
+                echo 'Esperando Flink JobManager...'
+                sleep 10
+              done
+              RUNNING=$(curl -sf http://flink-jobmanager:8081/jobs | python3 -c \
+                "import sys,json; jobs=json.load(sys.stdin).get('jobs',[]); print('YES' if any(j.get('status')=='RUNNING' for j in jobs) else 'NO')" 2>/dev/null || echo NO)
+              if [ "$RUNNING" = "YES" ]; then
+                echo 'Flink job ya en ejecucion'
+                exit 0
+              fi
+              exec /opt/flink/bin/flink run \
+                -m flink-jobmanager:8081 \
+                --python /opt/flink-job/predict_flink.py
+          env:
+            - name: KAFKA_BROKER
+              value: kafka:9092
+            - name: MINIO_ENDPOINT
+              value: http://minio:9000
+            - name: MINIO_ACCESS_KEY
+              value: minioadmin
+            - name: MINIO_SECRET_KEY
+              value: minioadmin
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 100m

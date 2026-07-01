@@ -1,0 +1,171 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nifi-setup-script
+  namespace: flight-prediction
+data:
+  setup_flow.py: |
+    import requests, time, sys
+    NIFI_URL = "http://nifi:8080/nifi-api"
+    MINIO_URL = "http://minio:9000/flight-data/raw/origin_dest_distances.jsonl"
+    HDR = {"Content-Type": "application/json"}
+
+    def wait_for_nifi():
+        print("Esperando NiFi...")
+        for attempt in range(40):
+            try:
+                r = requests.get(f"{NIFI_URL}/system-diagnostics", timeout=10)
+                if r.status_code == 200:
+                    print("NiFi listo.")
+                    return
+            except Exception as e:
+                print(f"  Esperando NiFi... ({attempt+1}/40): {e}")
+            time.sleep(15)
+        sys.exit("ERROR: NiFi no respondio a tiempo")
+
+    def get_root_pg_id():
+        r = requests.get(f"{NIFI_URL}/flow/process-groups/root", headers=HDR)
+        r.raise_for_status()
+        return r.json()["processGroupFlow"]["id"]
+
+    def create_processor(pg_id, proc_type, name, properties, position, auto_terminate=None):
+        body = {
+            "revision": {"version": 0},
+            "component": {
+                "type": proc_type, "name": name,
+                "position": {"x": position[0], "y": position[1]},
+                "config": {"properties": properties, "schedulingStrategy": "TIMER_DRIVEN",
+                           "schedulingPeriod": "1 sec", "autoTerminatedRelationships": auto_terminate or []}
+            }
+        }
+        r = requests.post(f"{NIFI_URL}/process-groups/{pg_id}/processors", headers=HDR, json=body)
+        r.raise_for_status()
+        proc = r.json()
+        print(f"  Procesador creado: {name}  id={proc['id']}")
+        return proc
+
+    def create_connection(pg_id, src_id, dst_id, relationships):
+        body = {
+            "revision": {"version": 0},
+            "component": {
+                "source": {"id": src_id, "groupId": pg_id, "type": "PROCESSOR"},
+                "destination": {"id": dst_id, "groupId": pg_id, "type": "PROCESSOR"},
+                "selectedRelationships": relationships,
+                "backPressureDataSizeThreshold": "1 GB",
+                "backPressureObjectThreshold": 10000,
+                "flowFileExpiration": "0 sec"
+            }
+        }
+        r = requests.post(f"{NIFI_URL}/process-groups/{pg_id}/connections", headers=HDR, json=body)
+        r.raise_for_status()
+        print(f"  Conexion creada: {relationships}")
+
+    def get_processor_state(proc_id):
+        r = requests.get(f"{NIFI_URL}/processors/{proc_id}", headers=HDR)
+        r.raise_for_status()
+        data = r.json()
+        return data["revision"]["version"], data["component"].get("validationErrors", [])
+
+    def start_processor(proc_id):
+        version, errors = get_processor_state(proc_id)
+        if errors:
+            print(f"  ADVERTENCIA validacion {proc_id}: {errors}")
+        body = {"revision": {"version": version}, "state": "RUNNING", "disconnectedNodeAcknowledged": False}
+        r = requests.put(f"{NIFI_URL}/processors/{proc_id}/run-status", headers=HDR, json=body)
+        r.raise_for_status()
+        print(f"  Procesador iniciado: {proc_id}")
+
+    wait_for_nifi()
+    pg_id = get_root_pg_id()
+    print(f"Root Process Group: {pg_id}")
+
+    generate = create_processor(pg_id, "org.apache.nifi.processors.standard.GenerateFlowFile", "GenerateFlowFile",
+        {"File Size": "0 B", "Batch Size": "1", "Data Format": "Text", "Unique FlowFiles": "false"}, position=(0, 0))
+    invoke_http = create_processor(pg_id, "org.apache.nifi.processors.standard.InvokeHTTP", "InvokeHTTP - MinIO",
+        {"HTTP Method": "GET", "Remote URL": MINIO_URL, "Connection Timeout": "10 secs", "Read Timeout": "30 secs"},
+        position=(300, 0), auto_terminate=["Original", "Retry", "No Retry", "Failure"])
+    split_text = create_processor(pg_id, "org.apache.nifi.processors.standard.SplitText", "SplitText",
+        {"Line Split Count": "1", "Header Line Count": "0", "Remove Trailing Newlines": "true"},
+        position=(600, 0), auto_terminate=["original", "failure"])
+    evaluate_json = create_processor(pg_id, "org.apache.nifi.processors.standard.EvaluateJsonPath", "EvaluateJsonPath",
+        {"Destination": "flowfile-attribute", "Return Type": "scalar",
+         "origin": "$.Origin", "dest": "$.Dest", "distance": "$.Distance"},
+        position=(900, 0), auto_terminate=["failure", "unmatched"])
+    cql = "INSERT INTO origin_dest_distances(origin, dest, distance) VALUES ('${origin}', '${dest}', ${distance})"
+    replace_text = create_processor(pg_id, "org.apache.nifi.processors.standard.ReplaceText", "ReplaceText",
+        {"Replacement Value": cql, "Replacement Strategy": "Always Replace",
+         "Evaluation Mode": "Entire text", "Character Set": "UTF-8"},
+        position=(1200, 0), auto_terminate=["failure"])
+    put_cassandra = create_processor(pg_id, "org.apache.nifi.processors.cassandra.PutCassandraQL", "PutCassandraQL",
+        {"Cassandra Contact Points": "cassandra:9042", "Keyspace": "flight_data"},
+        position=(1500, 0), auto_terminate=["success", "failure", "retry"])
+
+    create_connection(pg_id, generate["id"], invoke_http["id"], ["success"])
+    create_connection(pg_id, invoke_http["id"], split_text["id"], ["Response"])
+    create_connection(pg_id, split_text["id"], evaluate_json["id"], ["splits"])
+    create_connection(pg_id, evaluate_json["id"], replace_text["id"], ["matched"])
+    create_connection(pg_id, replace_text["id"], put_cassandra["id"], ["success"])
+
+    version, _ = get_processor_state(generate["id"])
+    requests.put(f"{NIFI_URL}/processors/{generate['id']}", headers=HDR,
+        json={"revision": {"version": version}, "component": {"id": generate["id"],
+              "config": {"schedulingPeriod": "3600 sec", "schedulingStrategy": "TIMER_DRIVEN"}}})
+
+    time.sleep(2)
+    for p in [put_cassandra, replace_text, evaluate_json, split_text, invoke_http, generate]:
+        start_processor(p["id"])
+    print("=== Flujo NiFi activo. Leyendo distancias desde MinIO -> Cassandra ===")
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nifi-init
+  namespace: flight-prediction
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-nifi
+          image: busybox
+          command:
+            - sh
+            - -c
+            - |
+              until wget -qO- http://nifi:8080/nifi-api/system-diagnostics >/dev/null 2>&1; do
+                echo "Esperando NiFi..."; sleep 15
+              done
+              echo "NiFi listo"
+        - name: wait-cassandra
+          image: cassandra:4.1
+          command:
+            - sh
+            - -c
+            - |
+              until cqlsh cassandra -e "describe keyspaces" 2>/dev/null; do
+                echo "Esperando Cassandra..."; sleep 10
+              done
+        - name: wait-minio
+          image: busybox
+          command:
+            - sh
+            - -c
+            - |
+              until wget -qO- http://minio:9000/minio/health/live >/dev/null 2>&1; do
+                echo "Esperando MinIO..."; sleep 5
+              done
+      containers:
+        - name: nifi-setup
+          image: python:3.12-slim
+          command:
+            - sh
+            - -c
+            - pip install requests -q && python3 /setup/setup_flow.py
+          volumeMounts:
+            - name: setup-script
+              mountPath: /setup
+      volumes:
+        - name: setup-script
+          configMap:
+            name: nifi-setup-script

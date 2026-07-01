@@ -67,5 +67,4 @@ spec:
   ports:
     - port: 5001
       targetPort: 5001
-      nodePort: 30501
-  type: NodePort
+  type: LoadBalancer

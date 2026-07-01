@@ -11,7 +11,7 @@ Variables de entorno configurables:
   JAR_PATH, SCRIPT_PATH, DATA_PATH  (paths locales a los archivos)
   REPO_ROOT  (alternativa: prefijo base para las rutas por defecto)
 """
-import hashlib, hmac, datetime, http.client, json, os
+import hashlib, hmac, datetime, http.client, json, os, socket, time
 
 ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", "minioadmin")
 SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "minioadmin")
@@ -48,6 +48,26 @@ def s3_request(method, bucket, key, body=b"", content_type="application/octet-st
     data = resp.read()
     conn.close()
     return resp.status, data
+
+def wait_for_minio(retries=30, delay=3):
+    host, port = ENDPOINT.split(":")
+    for i in range(retries):
+        try:
+            sock = socket.create_connection((host, int(port)), timeout=2)
+            sock.close()
+            print(f"  MinIO listo en {ENDPOINT}")
+            return
+        except (ConnectionRefusedError, OSError):
+            print(f"  Esperando MinIO... ({i+1}/{retries})")
+            time.sleep(delay)
+    raise RuntimeError(f"MinIO no disponible en {ENDPOINT} tras {retries} intentos")
+
+def create_bucket(bucket):
+    status, _ = s3_request("PUT", bucket, "", b"", "application/xml")
+    if status in (200, 201, 204, 409):  # 409 = ya existe
+        print(f"  OK: bucket '{bucket}'")
+    else:
+        print(f"  ERROR {status}: creando bucket '{bucket}'")
 
 def upload_file(local_path, bucket, key):
     with open(local_path, "rb") as f:
@@ -100,8 +120,16 @@ JAR_PATH           = os.environ.get("JAR_PATH",           f"{_base}/flight_predi
 SCRIPT_PATH        = os.environ.get("SCRIPT_PATH",        f"{_base}/resources/train_spark_mllib_model.py")
 ICEBERG_SCRIPT_PATH= os.environ.get("ICEBERG_SCRIPT_PATH",f"{_base}/resources/create_iceberg_table.py")
 DATA_PATH          = os.environ.get("DATA_PATH",          f"{_base}/data/simple_flight_delay_features.jsonl.bz2")
+DISTANCES_PATH     = os.environ.get("DISTANCES_PATH",     f"{_base}/data/origin_dest_distances.jsonl")
 
-print("=== 1. Subiendo JAR de inferencia a MinIO ===")
+print("=== 0. Esperando a que MinIO este listo ===")
+wait_for_minio()
+
+print("\n=== 0b. Creando buckets ===")
+create_bucket("models")
+create_bucket("flight-data")
+
+print("\n=== 1. Subiendo JAR de inferencia a MinIO ===")
 upload_file(JAR_PATH, "models", "flight_prediction_2.12-0.1.jar")
 
 print("\n=== 2. Subiendo script de entrenamiento a MinIO ===")
@@ -112,6 +140,9 @@ upload_file(ICEBERG_SCRIPT_PATH, "flight-data", "scripts/create_iceberg_table.py
 
 print("\n=== 4. Subiendo datos de entrenamiento a MinIO ===")
 upload_file(DATA_PATH, "flight-data", "raw/simple_flight_delay_features.jsonl.bz2")
+
+print("\n=== 4b. Subiendo distancias entre aeropuertos a MinIO ===")
+upload_file(DISTANCES_PATH, "flight-data", "raw/origin_dest_distances.jsonl")
 
 print("\n=== 4. Haciendo bucket 'models' de lectura publica ===")
 set_bucket_public_read("models")
@@ -124,3 +155,4 @@ print("  http://minio:9000/models/flight_prediction_2.12-0.1.jar")
 print("  http://minio:9000/flight-data/scripts/train_spark_mllib_model.py")
 print("  http://minio:9000/flight-data/scripts/create_iceberg_table.py")
 print("  s3a://flight-data/raw/simple_flight_delay_features.jsonl.bz2")
+print("  http://minio:9000/flight-data/raw/origin_dest_distances.jsonl")

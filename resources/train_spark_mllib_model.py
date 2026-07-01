@@ -40,7 +40,7 @@ def main(base_path):
         spark = pyspark.sql.SparkSession.builder \
             .appName(APP_NAME) \
             .master("spark://spark-master:7077") \
-            .config("spark.driver.host", "spark-master") \
+            .config("spark.driver.host", os.environ.get("SPARK_DRIVER_HOST", "spark-master")) \
             .config("spark.sql.extensions",
                     "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
             .config("spark.sql.catalog.minio_catalog",
@@ -157,6 +157,60 @@ def main(base_path):
 
     predictions.groupBy("Prediction").count().show()
     predictions.sample(False, 0.001, 18).orderBy("CRSDepTime").show(6)
+
+    # ── Modelo sklearn para Flink ────────────────────────────────────────────
+    print("\nEntrenando modelo sklearn para Flink...")
+    try:
+        import io as _io, boto3 as _boto3, numpy as _np, pandas as _pd
+        import joblib as _joblib
+        from sklearn.pipeline import Pipeline as _Pipeline
+        from sklearn.compose import ColumnTransformer as _ColumnTransformer
+        from sklearn.preprocessing import OrdinalEncoder as _OrdinalEncoder
+        from sklearn.ensemble import RandomForestClassifier as _SkRFC
+
+        sk_cat = ["Carrier", "Origin", "Dest", "Route"]
+        sk_num = ["DepDelay", "Distance", "DayOfMonth", "DayOfWeek", "DayOfYear"]
+
+        sk_pdf = (
+            features_with_route
+            .select(sk_cat + sk_num + ["ArrDelay"])
+            .dropna()
+            .sample(False, 0.3, 42)
+            .limit(200000)
+            .toPandas()
+        )
+
+        sk_pdf["ArrDelayBucket"] = _pd.cut(
+            sk_pdf["ArrDelay"],
+            bins=[-_np.inf, -15, 0, 30, _np.inf],
+            labels=[0, 1, 2, 3],
+            right=False,
+        ).astype(int)
+        sk_pdf = sk_pdf.dropna(subset=["ArrDelayBucket"])
+
+        sk_pre = _ColumnTransformer([
+            ("cat", _OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1), sk_cat),
+            ("num", "passthrough", sk_num),
+        ])
+        sk_pipe = _Pipeline([
+            ("preprocessor", sk_pre),
+            ("classifier",   _SkRFC(n_estimators=100, max_depth=15, random_state=42, n_jobs=-1)),
+        ])
+        sk_pipe.fit(sk_pdf[sk_cat + sk_num], sk_pdf["ArrDelayBucket"])
+
+        sk_buf = _io.BytesIO()
+        _joblib.dump(sk_pipe, sk_buf)
+        sk_buf.seek(0)
+        sk_s3 = _boto3.client(
+            "s3",
+            endpoint_url=MINIO_ENDPOINT,
+            aws_access_key_id=MINIO_ACCESS,
+            aws_secret_access_key=MINIO_SECRET,
+        )
+        sk_s3.put_object(Bucket="models", Key="sklearn_flight_model.joblib", Body=sk_buf.getvalue())
+        print("sklearn model guardado en MinIO: models/sklearn_flight_model.joblib")
+    except Exception as sk_err:
+        print("WARN: sklearn training failed: {}".format(sk_err))
 
 
 # MLflow tracking ya integrado arriba

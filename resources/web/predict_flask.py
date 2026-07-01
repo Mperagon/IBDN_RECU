@@ -53,7 +53,7 @@ def start_prediction_consumer():
            if isinstance(data.get('Timestamp'), str) else None
       cassandra_session.execute(cassandra_insert, (
         data.get('UUID'),
-        float(data.get('Prediction', 0)),
+        str(float(data.get('Prediction', 0))),
         ts,
         data.get('Origin'),
         data.get('Dest'),
@@ -545,7 +545,7 @@ def flight_delays_page_kafka():
     {'field': 'Origin', 'value': 'ATL'},
     {'field': 'Dest', 'label': 'Destination', 'value': 'SFO'}
   ]
-  
+
   return render_template('flight_delays_predict_kafka.html', form_config=form_config)
 
 @app.route("/flights/delays/predict/classify_realtime/response/<unique_id>")
