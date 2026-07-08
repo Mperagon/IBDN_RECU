@@ -340,55 +340,9 @@ def delays():
   return render_template('delays.html')
 
 # Load our regression model
-import joblib
-from os import environ
-
-
-project_home = os.environ["PROJECT_HOME"]
-# vectorizer = joblib.load("{}/models/sklearn_vectorizer.pkl".format(project_home))
-# regressor = joblib.load("{}/models/sklearn_regressor.pkl".format(project_home))
-
-# Make our API a post, so a search engine wouldn't hit it
 @app.route("/flights/delays/predict/regress", methods=['POST'])
 def regress_flight_delays():
-  
-  api_field_type_map = \
-    {
-      "DepDelay": int,
-      "Carrier": str,
-      "FlightDate": str,
-      "Dest": str,
-      "FlightNum": str,
-      "Origin": str
-    }
-  
-  api_form_values = {}
-  for api_field_name, api_field_type in api_field_type_map.items():
-    api_form_values[api_field_name] = request.form.get(api_field_name, type=api_field_type)
-  
-  # Set the direct values
-  prediction_features = {}
-  prediction_features['Origin'] = api_form_values['Origin']
-  prediction_features['Dest'] = api_form_values['Dest']
-  prediction_features['FlightNum'] = api_form_values['FlightNum']
-  
-  # Set the derived values
-  prediction_features['Distance'] = predict_utils.get_flight_distance(cassandra_session, api_form_values['Origin'], api_form_values['Dest'])
-  
-  # Turn the date into DayOfYear, DayOfMonth, DayOfWeek
-  date_features_dict = predict_utils.get_regression_date_args(api_form_values['FlightDate'])
-  for api_field_name, api_field_value in date_features_dict.items():
-    prediction_features[api_field_name] = api_field_value
-  
-  # Vectorize the features
-  feature_vectors = vectorizer.transform([prediction_features])
-  
-  # Make the prediction!
-  result = regressor.predict(feature_vectors)[0]
-  
-  # Return a JSON object
-  result_obj = {"Delay": result}
-  return json.dumps(result_obj)
+  return "Predicción por regresión no disponible (modelo legacy eliminado)", 503
 
 @app.route("/flights/delays/predict")
 def flight_delays_page():

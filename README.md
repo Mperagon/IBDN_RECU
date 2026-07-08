@@ -251,7 +251,7 @@ El script realiza automáticamente (~20-30 min):
 El deploy.sh lanza el DAG automáticamente. Puedes seguirlo en Airflow:
 
 1. Abre **Airflow** (ver URLs abajo, admin / admin)
-2. Activa el DAG `train_model_k8s` si no está activo
+2. Activa el DAG `agile_data_science_batch_prediction_model_training` si no está activo
 3. Espera a que las 3 tareas estén en verde (~10-60 minutos):
    - `check_spark` — verifica que Spark on K8s funciona
    - `train_model` — entrena Random Forest (Spark MLlib) + sklearn, guarda en MinIO y registra en MLflow
