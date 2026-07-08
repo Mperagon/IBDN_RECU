@@ -1,109 +1,59 @@
-import os
-import json
-import logging
-
-KAFKA_BROKER  = os.environ.get("KAFKA_BROKER",        "kafka:9092")
-MLFLOW_URI    = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
-MODEL_NAME    = "sklearn_flight_model"
-MODEL_STAGE   = "Production"
-
-from pyflink.datastream import StreamExecutionEnvironment
-from pyflink.datastream.connectors.kafka import (
-    KafkaSource, KafkaSink, KafkaRecordSerializationSchema, KafkaOffsetsInitializer,
-    DeliveryGuarantee,
+"""
+Crea la tabla Iceberg flight_features en MinIO a partir de los datos de entrenamiento.
+Ejecutado en K8s via spark-submit (deploy-mode cluster). Las credenciales S3A
+se inyectan desde el spark-submit mediante --conf spark.hadoop.fs.s3a.*.
+"""
+from pyspark.sql import SparkSession
+from pyspark.sql.types import (
+    StructType, StructField, StringType, DoubleType, IntegerType,
 )
-from pyflink.common import WatermarkStrategy, Types
-from pyflink.common.serialization import SimpleStringSchema
-from pyflink.datastream.functions import MapFunction
 
+spark = SparkSession.builder \
+    .appName("CreateIcebergTable") \
+    .config("spark.sql.extensions",
+            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
+    .config("spark.sql.catalog.minio_catalog",
+            "org.apache.iceberg.spark.SparkCatalog") \
+    .config("spark.sql.catalog.minio_catalog.type", "hadoop") \
+    .config("spark.sql.catalog.minio_catalog.warehouse",
+            "s3a://flight-data/iceberg") \
+    .getOrCreate()
 
-class FlightPredictFunction(MapFunction):
-    """Carga el modelo sklearn desde MLflow Model Registry y predice retrasos."""
+spark.sparkContext.setLogLevel("WARN")
 
-    def __init__(self):
-        self._model = None
+schema = StructType([
+    StructField("ArrDelay",   DoubleType(),  True),
+    StructField("Carrier",    StringType(),  True),
+    StructField("DayOfMonth", IntegerType(), True),
+    StructField("DayOfWeek",  IntegerType(), True),
+    StructField("DayOfYear",  IntegerType(), True),
+    StructField("DepDelay",   DoubleType(),  True),
+    StructField("Dest",       StringType(),  True),
+    StructField("Distance",   DoubleType(),  True),
+    StructField("FlightDate", StringType(),  True),
+    StructField("FlightNum",  StringType(),  True),
+    StructField("Origin",     StringType(),  True),
+])
 
-    def open(self, runtime_context):
-        import mlflow.sklearn
-        mlflow.set_tracking_uri(MLFLOW_URI)
-        self._model = mlflow.sklearn.load_model("models:/{}/{}".format(MODEL_NAME, MODEL_STAGE))
-        logging.info("Modelo sklearn cargado desde MLflow registry (%s/%s)", MODEL_NAME, MODEL_STAGE)
+print("Leyendo datos de entrenamiento desde MinIO...")
+df = spark.read.json(
+    "s3a://flight-data/raw/simple_flight_delay_features.jsonl.bz2",
+    schema=schema,
+)
+count = df.count()
+print(f"Filas leidas: {count}")
 
-    def map(self, message):
-        import pandas as pd
-        try:
-            data = json.loads(message)
-            route = "{}-{}".format(data.get("Origin", ""), data.get("Dest", ""))
-            row = pd.DataFrame([{
-                "Carrier":    str(data.get("Carrier", "")),
-                "Origin":     str(data.get("Origin", "")),
-                "Dest":       str(data.get("Dest", "")),
-                "Route":      route,
-                "DepDelay":   float(data.get("DepDelay",   0) or 0),
-                "Distance":   float(data.get("Distance",   0) or 0),
-                "DayOfMonth": int(data.get("DayOfMonth",   1) or 1),
-                "DayOfWeek":  int(data.get("DayOfWeek",    1) or 1),
-                "DayOfYear":  int(data.get("DayOfYear",    1) or 1),
-            }])
-            prediction = float(self._model.predict(row)[0])
-            result = {
-                "UUID":       data.get("UUID", ""),
-                "Prediction": prediction,
-                "Origin":     data.get("Origin", ""),
-                "Dest":       data.get("Dest", ""),
-                "Carrier":    data.get("Carrier", ""),
-                "DepDelay":   float(data.get("DepDelay", 0) or 0),
-                "Timestamp":  data.get("Timestamp", ""),
-            }
-            return json.dumps(result)
-        except Exception as exc:
-            logging.error("Error en prediccion: %s", exc)
-            return None
+print("Escribiendo tabla Iceberg en MinIO...")
+spark.sql("CREATE NAMESPACE IF NOT EXISTS minio_catalog")
+df.writeTo("minio_catalog.flight_features") \
+  .tableProperty("write.format.default", "parquet") \
+  .createOrReplace()
 
+spark.sql("SELECT COUNT(*) AS total FROM minio_catalog.flight_features").show()
+spark.sql(
+    "SELECT Carrier, Origin, Dest, DepDelay, ArrDelay "
+    "FROM minio_catalog.flight_features LIMIT 5"
+).show()
 
-def main():
-    env = StreamExecutionEnvironment.get_execution_environment()
-    env.set_parallelism(2)
-    env.enable_checkpointing(10000)
-
-    kafka_source = (
-        KafkaSource.builder()
-        .set_bootstrap_servers(KAFKA_BROKER)
-        .set_topics("flight-delay-ml-request")
-        .set_group_id("flink-flight-predictor")
-        .set_starting_offsets(KafkaOffsetsInitializer.latest())
-        .set_value_only_deserializer(SimpleStringSchema())
-        .build()
-    )
-
-    stream = env.from_source(
-        kafka_source,
-        WatermarkStrategy.no_watermarks(),
-        "Kafka Source - flight-delay-ml-request",
-    )
-
-    predictions = (
-        stream
-        .map(FlightPredictFunction(), output_type=Types.STRING())
-        .filter(lambda x: x is not None)
-    )
-
-    kafka_sink = (
-        KafkaSink.builder()
-        .set_bootstrap_servers(KAFKA_BROKER)
-        .set_delivery_guarantee(DeliveryGuarantee.AT_LEAST_ONCE)
-        .set_record_serializer(
-            KafkaRecordSerializationSchema.builder()
-            .set_topic("flight-predictions")
-            .set_value_serialization_schema(SimpleStringSchema())
-            .build()
-        )
-        .build()
-    )
-
-    predictions.sink_to(kafka_sink)
-    env.execute("Flight Delay Prediction - Flink")
-
-
-if __name__ == "__main__":
-    main()
+print(f"\nOK - Tabla Iceberg creada en s3a://flight-data/iceberg/flight_features")
+spark.stop()

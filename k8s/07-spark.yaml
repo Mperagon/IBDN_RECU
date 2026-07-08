@@ -1,174 +1,63 @@
-# PVC compartida para caché de dependencias Maven/Ivy (usada por Spark y Airflow DAG)
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: ivy2-cache
-  namespace: flight-prediction
-spec:
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 5Gi
----
-# Spark Master
+# Spark History Server — visualiza event logs de jobs completados almacenados en MinIO.
+# El DAG de entrenamiento escribe los logs en s3a://flight-data/spark-history
+# via --conf spark.eventLog.enabled=true y --conf spark.eventLog.dir=...
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: spark-master
+  name: spark-history-server
   namespace: flight-prediction
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: spark-master
+      app: spark-history-server
   template:
     metadata:
       labels:
-        app: spark-master
+        app: spark-history-server
     spec:
-      enableServiceLinks: false
-      securityContext:
-        runAsUser: 0
       containers:
-        - name: spark-master
-          image: apache/spark:3.5.3
-          command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+        - name: spark-history-server
+          image: flight-prediction/spark:3.5.3
+          imagePullPolicy: IfNotPresent
+          command:
+            - /opt/spark/bin/spark-class
+            - org.apache.spark.deploy.history.HistoryServer
           ports:
-            - containerPort: 8080
-            - containerPort: 7077
+            - containerPort: 18080
           env:
-            - name: SPARK_MODE
-              value: master
-            - name: SPARK_MASTER_PORT
-              value: "7077"
-            - name: SPARK_MASTER_WEBUI_PORT
-              value: "8080"
+            - name: SPARK_HISTORY_OPTS
+              value: >-
+                -Dspark.history.fs.logDirectory=s3a://flight-data/spark-history
+                -Dspark.hadoop.fs.s3a.endpoint=http://minio:9000
+                -Dspark.hadoop.fs.s3a.access.key=minioadmin
+                -Dspark.hadoop.fs.s3a.secret.key=minioadmin
+                -Dspark.hadoop.fs.s3a.path.style.access=true
+                -Dspark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
+                -Dspark.hadoop.fs.s3a.connection.ssl.enabled=false
           resources:
             requests:
               memory: 512Mi
               cpu: 200m
-          volumeMounts:
-            - name: ivy2
-              mountPath: /root/.ivy2
-      volumes:
-        - name: ivy2
-          emptyDir: {}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 18080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 6
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: spark-master
+  name: spark-history-server
   namespace: flight-prediction
 spec:
   selector:
-    app: spark-master
+    app: spark-history-server
   ports:
     - name: ui
-      port: 8080
-      targetPort: 8080
-      nodePort: 30080
-    - name: rpc
-      port: 7077
-      targetPort: 7077
+      port: 18080
+      targetPort: 18080
+      nodePort: 30180
   type: NodePort
----
-# Headless service: DNS resuelve directamente a la IP del pod (igual que Docker Compose)
-# Así spark-submit puede usar --conf spark.driver.host=spark-master sin IP lookup manual
-apiVersion: v1
-kind: Service
-metadata:
-  name: spark-master-headless
-  namespace: flight-prediction
-spec:
-  clusterIP: None
-  selector:
-    app: spark-master
-  ports:
-    - name: rpc
-      port: 7077
-      targetPort: 7077
-    - name: driver
-      port: 4040
-      targetPort: 4040
----
-# Spark Worker 1
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: spark-worker-1
-  namespace: flight-prediction
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: spark-worker-1
-  template:
-    metadata:
-      labels:
-        app: spark-worker-1
-    spec:
-      enableServiceLinks: false
-      securityContext:
-        runAsUser: 0
-      containers:
-        - name: spark-worker
-          image: apache/spark:3.5.3
-          command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
-          env:
-            - name: SPARK_MODE
-              value: worker
-            - name: SPARK_WORKER_CORES
-              value: "2"
-            - name: SPARK_WORKER_MEMORY
-              value: "1g"
-          resources:
-            requests:
-              memory: 1Gi
-              cpu: "500m"
-          volumeMounts:
-            - name: ivy2
-              mountPath: /root/.ivy2
-      volumes:
-        - name: ivy2
-          emptyDir: {}
----
-# Spark Worker 2
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: spark-worker-2
-  namespace: flight-prediction
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: spark-worker-2
-  template:
-    metadata:
-      labels:
-        app: spark-worker-2
-    spec:
-      enableServiceLinks: false
-      securityContext:
-        runAsUser: 0
-      containers:
-        - name: spark-worker
-          image: apache/spark:3.5.3
-          command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
-          env:
-            - name: SPARK_MODE
-              value: worker
-            - name: SPARK_WORKER_CORES
-              value: "2"
-            - name: SPARK_WORKER_MEMORY
-              value: "1g"
-          resources:
-            requests:
-              memory: 1Gi
-              cpu: "500m"
-          volumeMounts:
-            - name: ivy2
-              mountPath: /root/.ivy2
-      volumes:
-        - name: ivy2
-          emptyDir: {}

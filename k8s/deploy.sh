@@ -167,6 +167,13 @@ echo ""
 echo "=== 12. Flink ==="
 kubectl apply -f "$REPO_ROOT/k8s/20-flink.yaml"
 
+# ── 12b. Spark Streaming — predicción en tiempo real ──────────────────────────
+echo ""
+echo "=== 12b. Spark Streaming Predict ==="
+kubectl delete job spark-streaming-predict -n $NAMESPACE --ignore-not-found 2>/dev/null || true
+kubectl apply -f "$REPO_ROOT/k8s/21-spark-streaming.yaml"
+echo "  → Job creado. Esperará al modelo sklearn en MinIO antes de arrancar."
+
 # ── 13. Iceberg: crear tabla de features ──────────────────────────────────────
 echo ""
 echo "=== 13. Iceberg — creando tabla de features en MinIO ==="

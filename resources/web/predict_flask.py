@@ -22,8 +22,7 @@ cassandra_insert = cassandra_session.prepare(
   "INSERT INTO flight_data.flight_predictions (uuid, prediction, timestamp, origin, dest, carrier, dep_delay) VALUES (?, ?, ?, ?, ?, ?, ?)"
 )
 
-#from pyelasticsearch import ElasticSearch
-#elastic = ElasticSearch(config.ELASTIC_URL)
+elastic = None  # Elasticsearch desactivado; las rutas /airplanes y /flights/search devuelven 503
 
 import json
 
@@ -203,6 +202,8 @@ def search_airplanes():
       query['query']['bool']['must'].append({'match': {field: value}})
 
   # Query elasticsearch, process to get records and count
+  if elastic is None:
+    return "Búsqueda de aviones no disponible (Elasticsearch no configurado)", 503
   results = elastic.search(query)
   airplanes, airplane_count = predict_utils.process_search(results)
 
@@ -314,6 +315,8 @@ def search_flights():
     query['query']['bool']['must'].append({'match': {'FlightNum': flight_number}})
 
   # Query elasticsearch, process to get records and count
+  if elastic is None:
+    return "Búsqueda de vuelos no disponible (Elasticsearch no configurado)", 503
   results = elastic.search(query)
   flights, flight_count = predict_utils.process_search(results)
 

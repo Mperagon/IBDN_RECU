@@ -1,0 +1,74 @@
+# Spark Streaming — predicción de retrasos en tiempo real.
+# Lee del topic Kafka 'flight-delay-ml-request', predice con el modelo sklearn
+# almacenado en MinIO y publica en 'spark-flight-predictions'.
+#
+# Usa deploy-mode client: este pod ES el driver. Los executors se crean como
+# pods K8s adicionales. Si el job falla, K8s lo reinicia (backoffLimit: 10).
+# Espera al modelo sklearn en MinIO antes de arrancar.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: spark-streaming-predict
+  namespace: flight-prediction
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      serviceAccountName: spark
+      restartPolicy: OnFailure
+      containers:
+        - name: spark-streaming-submit
+          image: flight-prediction/spark:3.5.3
+          imagePullPolicy: IfNotPresent
+          command: [bash, -c]
+          args:
+            - |
+              until python3 -c "
+              import boto3, sys
+              s3 = boto3.client('s3', endpoint_url='http://minio:9000',
+                  aws_access_key_id='minioadmin', aws_secret_access_key='minioadmin')
+              try: s3.head_object(Bucket='flight-data', Key='models/sklearn_random_forest.joblib'); sys.exit(0)
+              except: sys.exit(1)
+              " 2>/dev/null; do
+                echo 'Esperando modelo sklearn en MinIO...'
+                sleep 30
+              done
+              echo 'Modelo disponible. Arrancando Spark Streaming...'
+              exec /opt/spark/bin/spark-submit \
+                --master k8s://https://kubernetes.default.svc:443 \
+                --deploy-mode client \
+                --name spark-streaming-predict \
+                --conf spark.executor.instances=2 \
+                --conf spark.driver.memory=1g \
+                --conf spark.executor.memory=1g \
+                --conf spark.driver.host=${MY_POD_IP} \
+                --conf spark.driver.bindAddress=0.0.0.0 \
+                --conf spark.kubernetes.container.image=flight-prediction/spark:3.5.3 \
+                --conf spark.kubernetes.namespace=flight-prediction \
+                --conf spark.kubernetes.authenticate.driver.serviceAccountName=spark \
+                --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 \
+                --conf spark.hadoop.fs.s3a.access.key=minioadmin \
+                --conf spark.hadoop.fs.s3a.secret.key=minioadmin \
+                --conf spark.hadoop.fs.s3a.path.style.access=true \
+                --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
+                --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false \
+                --conf spark.eventLog.enabled=true \
+                --conf spark.eventLog.dir=s3a://flight-data/spark-history \
+                http://minio:9000/flight-data/scripts/predict_spark_streaming.py
+          env:
+            - name: MY_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: KAFKA_BROKER
+              value: kafka:9092
+            - name: AWS_ACCESS_KEY_ID
+              value: minioadmin
+            - name: AWS_SECRET_ACCESS_KEY
+              value: minioadmin
+            - name: MLFLOW_S3_ENDPOINT_URL
+              value: http://minio:9000
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 500m
