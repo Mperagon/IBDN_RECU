@@ -5,17 +5,21 @@ Arquitectura de Big Data completamente distribuida con Spark, Kafka, Cassandra, 
 ## Arquitectura
 
 ```
-Flask (web) → Kafka → Flink (predicción RT) → Cassandra
-                 ↓                                  ↑
-             Logstash → Elasticsearch           NiFi (carga distancias)
-                 ↓           ↓                      ↑
-               Kibana    (visualización)     origin_dest_distances.jsonl
+Flask (web) → Kafka → Flink (predicción RT, parallelism 2) → flight-predictions
+                 ↓                                                     ↑
+                 └──→ Spark Streaming (predicción RT, cluster K8s) → spark-flight-predictions
+                 ↓
+             Logstash → Elasticsearch → Kibana (visualización)
                                    ↑
-                         Modelo sklearn (MinIO s3a://models/)
+                         Modelo sklearn (MLflow Registry / MinIO)
                                    ↑
                     Airflow DAG → Spark MLlib ← Iceberg (MinIO)
                                       ↓
                                    MLflow (PostgreSQL + MinIO)
+
+NiFi (carga distancias) ← origin_dest_distances.jsonl (MinIO)
+         ↓
+    Cassandra (flight_data.origin_dest_distances)
 ```
 
 ### Modo 100% distribuido
@@ -51,7 +55,7 @@ Todo el estado persiste en servicios distribuidos, sin dependencias de disco loc
 ### 1. Clonar el repositorio
 
 ```bash
-git clone https://github.com/Mperagon/IBDN.git practica_creativa
+git clone https://github.com/Mperagon/IBDN_RECU.git practica_creativa
 cd practica_creativa
 ```
 
@@ -82,7 +86,7 @@ Los siguientes contenedores aparecerán como `Exited (0)` — es normal, son de 
 | Contenedor | Qué hace |
 |---|---|
 | `cassandra-init` | Crea el keyspace `flight_data` y las tablas en Cassandra |
-| `nifi-init` | Configura el flujo NiFi via REST API (`GetFile → SplitText → EvaluateJsonPath → ReplaceText → PutCassandraQL`) |
+| `nifi-init` | Configura el flujo NiFi via REST API (`GenerateFlowFile → InvokeHTTP (MinIO) → SplitText → EvaluateJsonPath → ReplaceText → MergeContent (batch 100) → PutCassandraQL`) |
 | `cassandra-nifi-wait` | Espera a que NiFi termine de cargar las 4696 distancias en Cassandra |
 | `minio-init` | Sube el script de entrenamiento y los datos brutos a MinIO; configura buckets públicos |
 | `airflow-init` | Crea el esquema de base de datos de Airflow y el usuario admin |
@@ -133,7 +137,13 @@ Una vez completado, los modelos quedan en `s3a://models/` y las métricas en MLf
 
 ### Verificar el modo distribuido
 
-Comprueba en la **YARN ResourceManager UI** (`http://localhost:8088`) que los jobs aparecen como aplicaciones YARN en estado `RUNNING` o `FINISHED`. Esto confirma que el driver corre en los NodeManagers con `--deploy-mode cluster`.
+Comprueba en el **Spark History Server** (`http://localhost:18080`) que los jobs de entrenamiento aparecen en estado `FINISHED`. Esto confirma que el driver corrió en modo cluster dentro del clúster Kubernetes (`--deploy-mode cluster --master k8s://...`).
+
+Para ver los pods del driver y los executors distribuidos en los nodos:
+
+```bash
+kubectl get pods -n flight-prediction -o wide | grep -E "driver|exec"
+```
 
 ---
 
@@ -201,7 +211,6 @@ Abre el navegador en `http://localhost:5001/flights/delays/predict_kafka`, relle
 | MinIO Web      | 9001       |
 | Kafka          | 9092       |
 | Cassandra      | 9042       |
-| MongoDB        | 27017      |
 | Elasticsearch  | 9200       |
 | Kibana         | 5601       |
 
@@ -242,13 +251,15 @@ El script realiza automáticamente (~20-30 min):
 El deploy.sh lanza el DAG automáticamente. Puedes seguirlo en Airflow:
 
 1. Abre **Airflow** (ver URLs abajo, admin / admin)
-2. Activa el DAG `agile_data_science_batch_prediction_model_training` si no está activo
+2. Activa el DAG `train_model_k8s` si no está activo
 3. Espera a que las 3 tareas estén en verde (~10-60 minutos):
    - `check_spark` — verifica que Spark on K8s funciona
-   - `train_model` — entrena Random Forest (Spark MLlib) + sklearn, guarda en MinIO
-   - `register_mlflow` — verifica las métricas en MLflow
+   - `train_model` — entrena Random Forest (Spark MLlib) + sklearn, guarda en MinIO y registra en MLflow
+   - `register_mlflow` — promueve el modelo a stage `Production` en MLflow Registry
 
-Una vez completado, **Flink** detecta el modelo en MLflow (Production) y **Spark Streaming** detecta el modelo en Iceberg — ambos empiezan a procesar predicciones desde Kafka automáticamente.
+Una vez completado:
+- **Flink** (parallelism 2, 2 TaskManagers, checkpointing cada 10s) detecta el modelo en MLflow Registry (stage `Production`) y empieza a publicar predicciones en el topic `flight-predictions`.
+- **Spark Streaming** (cluster mode K8s, driver + 2 executors) detecta el modelo en MinIO/Iceberg y publica en `spark-flight-predictions`.
 
 #### 3. Acceder a los servicios (Windows + Docker Desktop)
 
