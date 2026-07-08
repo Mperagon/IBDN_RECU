@@ -22,7 +22,8 @@ cassandra_insert = cassandra_session.prepare(
   "INSERT INTO flight_data.flight_predictions (uuid, prediction, timestamp, origin, dest, carrier, dep_delay) VALUES (?, ?, ?, ?, ?, ?, ?)"
 )
 
-elastic = None  # Elasticsearch desactivado; las rutas /airplanes y /flights/search devuelven 503
+from elasticsearch import Elasticsearch
+elastic = Elasticsearch([os.environ.get('ELASTIC_URL', 'http://elasticsearch:9200')])
 
 import json
 
@@ -202,9 +203,7 @@ def search_airplanes():
       query['query']['bool']['must'].append({'match': {field: value}})
 
   # Query elasticsearch, process to get records and count
-  if elastic is None:
-    return "Búsqueda de aviones no disponible (Elasticsearch no configurado)", 503
-  results = elastic.search(query)
+  results = elastic.search(index="agile_data_science", body=query)
   airplanes, airplane_count = predict_utils.process_search(results)
 
   # Persist search parameters in the form template
@@ -315,9 +314,7 @@ def search_flights():
     query['query']['bool']['must'].append({'match': {'FlightNum': flight_number}})
 
   # Query elasticsearch, process to get records and count
-  if elastic is None:
-    return "Búsqueda de vuelos no disponible (Elasticsearch no configurado)", 503
-  results = elastic.search(query)
+  results = elastic.search(index="agile_data_science", body=query)
   flights, flight_count = predict_utils.process_search(results)
 
   # Persist search parameters in the form template

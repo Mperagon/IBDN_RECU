@@ -8,7 +8,8 @@ def process_search(results):
   records = []
   total = 0
   if results['hits'] and results['hits']['hits']:
-    total = results['hits']['total']
+    raw_total = results['hits']['total']
+    total = raw_total['value'] if isinstance(raw_total, dict) else raw_total
     hits = results['hits']['hits']
     for hit in hits:
       record = hit['_source']

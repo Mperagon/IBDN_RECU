@@ -19,7 +19,7 @@ data:
         add_field => { "log_type" => "flight_prediction" }
       }
       date {
-        match => ["timestamp", "ISO8601", "UNIX_MS"]
+        match => ["Timestamp", "ISO8601", "UNIX_MS", "yyyy-MM-dd'T'HH:mm:ss.SSSSSS"]
         target => "@timestamp"
         tag_on_failure => []
       }
