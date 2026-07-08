@@ -116,7 +116,6 @@ def set_bucket_public_read(bucket):
         print(f"  ERROR {resp.status}: setting bucket policy on '{bucket}'")
 
 _base = os.environ.get("REPO_ROOT", "/app")
-JAR_PATH           = os.environ.get("JAR_PATH",           f"{_base}/flight_prediction/target/scala-2.12/flight_prediction_2.12-0.1.jar")
 SCRIPT_PATH        = os.environ.get("SCRIPT_PATH",        f"{_base}/resources/train_spark_mllib_model.py")
 ICEBERG_SCRIPT_PATH= os.environ.get("ICEBERG_SCRIPT_PATH",f"{_base}/resources/create_iceberg_table.py")
 DATA_PATH          = os.environ.get("DATA_PATH",          f"{_base}/data/simple_flight_delay_features.jsonl.bz2")
@@ -129,10 +128,7 @@ print("\n=== 0b. Creando buckets ===")
 create_bucket("models")
 create_bucket("flight-data")
 
-print("\n=== 1. Subiendo JAR de inferencia a MinIO ===")
-upload_file(JAR_PATH, "models", "flight_prediction_2.12-0.1.jar")
-
-print("\n=== 2. Subiendo script de entrenamiento a MinIO ===")
+print("\n=== 1. Subiendo script de entrenamiento a MinIO ===")
 upload_file(SCRIPT_PATH, "flight-data", "scripts/train_spark_mllib_model.py")
 
 print("\n=== 3. Subiendo script de creacion de tabla Iceberg a MinIO ===")
@@ -151,7 +147,6 @@ print("\n=== 5. Haciendo bucket 'flight-data' de lectura publica ===")
 set_bucket_public_read("flight-data")
 
 print("\nDone. Recursos disponibles en MinIO:")
-print("  http://minio:9000/models/flight_prediction_2.12-0.1.jar")
 print("  http://minio:9000/flight-data/scripts/train_spark_mllib_model.py")
 print("  http://minio:9000/flight-data/scripts/create_iceberg_table.py")
 print("  s3a://flight-data/raw/simple_flight_delay_features.jsonl.bz2")

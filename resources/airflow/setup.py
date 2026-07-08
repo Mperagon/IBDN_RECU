@@ -24,7 +24,7 @@ check_spark = BashOperator(
     task_id='check_spark',
     bash_command="""
 docker exec spark-master /opt/spark/bin/spark-submit \
-  --master spark://spark-master:7077 \
+  --master yarn \
   --deploy-mode cluster \
   --class org.apache.spark.examples.SparkPi \
   /opt/spark/examples/jars/spark-examples_2.12-3.5.3.jar 2
@@ -39,9 +39,10 @@ train_model = BashOperator(
 docker exec -u root spark-master bash -c "pip install --quiet mlflow scikit-learn pandas boto3 2>/dev/null; exit 0" || true
 docker exec -u root spark-master \
   /opt/spark/bin/spark-submit \
-  --master spark://spark-master:7077 \
+  --master yarn \
   --deploy-mode cluster \
   --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262 \
+  --conf spark.rpc.message.maxSize=256 \
   http://minio:9000/flight-data/scripts/train_spark_mllib_model.py
 """,
     execution_timeout=timedelta(minutes=70),
@@ -55,30 +56,38 @@ docker exec mlflow python3 << 'EOF'
 import mlflow, sys
 mlflow.set_tracking_uri('http://localhost:5000')
 
+# Verificar runs del experimento (Spark MLlib + sklearn)
 try:
-    exps = mlflow.search_experiments()
-    print('Experimentos en MLflow:', len(exps))
-    for e in exps:
-        print(' -', e.name)
-
-    target = next((e for e in exps if e.name == 'flight_delay_prediction'), None)
+    target = next((e for e in mlflow.search_experiments() if e.name == 'flight_delay_prediction'), None)
     if not target:
         print('ERROR: experimento flight_delay_prediction no encontrado')
         sys.exit(1)
-
-    runs = mlflow.search_runs(experiment_ids=[target.experiment_id], max_results=5)
-    print('Runs en flight_delay_prediction:', len(runs))
+    runs = mlflow.search_runs(experiment_ids=[target.experiment_id], max_results=10)
     if runs.empty:
         print('ERROR: no hay runs registrados')
         sys.exit(1)
-    for _, row in runs.head(3).iterrows():
-        print('  Run:', str(row.get('run_id', ''))[:8], '| Status:', row.get('status'))
-        print('  accuracy =', row.get('metrics.accuracy', 'N/A'))
-        print('  maxBins =', row.get('params.maxBins', 'N/A'),
-              '| maxMemoryInMB =', row.get('params.maxMemoryInMB', 'N/A'))
+    print('Runs en flight_delay_prediction:', len(runs))
+    for _, row in runs.head(5).iterrows():
+        print('  Run:', str(row.get('run_id', ''))[:8],
+              '| accuracy =', row.get('metrics.accuracy', 'N/A'))
 except Exception as ex:
-    print('Error:', ex)
+    print('Error experimento:', ex)
     sys.exit(1)
+
+# Verificar sklearn en Model Registry (Production)
+try:
+    client = mlflow.tracking.MlflowClient()
+    versions = client.get_latest_versions('sklearn_flight_model', stages=['Production'])
+    if not versions:
+        print('ERROR: sklearn_flight_model no encontrado en Production')
+        sys.exit(1)
+    v = versions[0]
+    print('sklearn_flight_model Production: version', v.version, '| run_id:', v.run_id[:8])
+except Exception as ex:
+    print('Error sklearn registry:', ex)
+    sys.exit(1)
+
+print('OK - Ambos modelos verificados en MLflow')
 EOF
 """,
     dag=training_dag,

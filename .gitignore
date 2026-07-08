@@ -39,3 +39,10 @@ env/
 .claude/
 *.pdf
 generate_pdf*.py
+y/google-cloud-sdk/platform/bundledpythonunix/
+y/google-cloud-sdk/platform/gsutil/third_party/funcsigs/docs/index.rst
+y/google-cloud-sdk/platform/gsutil/third_party/google-auth-library-python-httplib2/docs/CHANGELOG.md
+y/google-cloud-sdk/platform/gsutil/third_party/google-auth-library-python-httplib2/docs/README.rst
+y/google-cloud-sdk/platform/gsutil/third_party/mock/docs/changelog.txt
+y/google-cloud-sdk/platform/gsutil/third_party/requests/tests/certs/mtls/client/ca
+y/google-cloud-sdk/platform/gsutil/third_party/requests/tests/certs/valid/ca

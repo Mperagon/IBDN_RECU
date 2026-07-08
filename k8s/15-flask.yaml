@@ -14,22 +14,18 @@ spec:
         app: flask
     spec:
       initContainers:
-        - name: wait-cassandra-init
+        - name: wait-cassandra
           image: busybox
           command:
             - sh
             - -c
-            - |
-              until nc -z cassandra 9042; do
-                echo "Waiting for Cassandra..."; sleep 5
-              done
-              echo "Cassandra ready"
+            - until nc -z cassandra 9042; do echo "Waiting Cassandra..."; sleep 5; done
         - name: wait-kafka
           image: busybox
           command:
             - sh
             - -c
-            - until nc -z kafka 9092; do sleep 3; done
+            - until nc -z kafka 9092; do echo "Waiting Kafka..."; sleep 3; done
       containers:
         - name: flask
           image: ${IMAGE_PREFIX}flask:latest

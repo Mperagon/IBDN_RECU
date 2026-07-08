@@ -1,51 +1,52 @@
 var socket = io();
 var pendingId = null;
-var receivedPredictions = {};
+var receivedFlink = {};
+var receivedSpark  = {};
 
-// WebSocket: recibe predicciones de Spark via Flask
-socket.on('prediction', function(data) {
-  receivedPredictions[data.UUID] = data;
+function bucketLabel(pred) {
+  if (pred == 0)      return "Early (15+ min early)";
+  if (pred == 1)      return "Slightly Early (0-15 min early)";
+  if (pred == 2)      return "Slightly Late (0-30 min delay)";
+  if (pred == 3)      return "Very Late (30+ min delay)";
+  return "Prediction: " + pred;
+}
+
+socket.on('prediction_flink', function(data) {
+  receivedFlink[data.UUID] = data;
   if (pendingId && data.UUID === pendingId) {
-    renderPage(data);
-    pendingId = null;
+    var pred = data.Prediction !== undefined ? data.Prediction : data.prediction;
+    $("#result_flink").text(bucketLabel(pred));
   }
 });
 
-// Envío del formulario
+socket.on('prediction_spark', function(data) {
+  receivedSpark[data.UUID] = data;
+  if (pendingId && data.UUID === pendingId) {
+    var pred = data.Prediction !== undefined ? data.Prediction : data.prediction;
+    $("#result_spark").text(bucketLabel(pred));
+  }
+});
+
 $("#flight_delay_classification").submit(function(event) {
   event.preventDefault();
-
   var $form = $(this);
-  var url   = $form.attr("action");
 
-  var posting = $.post(url, $form.serialize());
+  $("#result_flink").text("Processing...");
+  $("#result_spark").text("Processing...");
 
-  posting.done(function(data) {
+  $.post($form.attr("action"), $form.serialize()).done(function(data) {
     var response = JSON.parse(data);
     if (response.status === "OK") {
       pendingId = response.id;
-      $("#result").empty().append("Processing...");
 
-      // Si la predicción ya llegó antes de que se estableciera pendingId
-      if (receivedPredictions[pendingId]) {
-        renderPage(receivedPredictions[pendingId]);
-        pendingId = null;
+      if (receivedFlink[pendingId]) {
+        var pred = receivedFlink[pendingId].Prediction;
+        $("#result_flink").text(bucketLabel(pred));
+      }
+      if (receivedSpark[pendingId]) {
+        var pred = receivedSpark[pendingId].Prediction;
+        $("#result_spark").text(bucketLabel(pred));
       }
     }
   });
 });
-
-// Renderiza la predicción en pantalla
-// Buckets: [-inf, -15, 0, 30, +inf]
-function renderPage(data) {
-  var pred = data.Prediction !== undefined ? data.Prediction : data.prediction;
-  var msg;
-
-  if (pred == 0)      { msg = "Early (15+ Minutes Early)"; }
-  else if (pred == 1) { msg = "Slightly Early (0-15 Minutes Early)"; }
-  else if (pred == 2) { msg = "Slightly Late (0-30 Minute Delay)"; }
-  else if (pred == 3) { msg = "Very Late (30+ Minutes Late)"; }
-  else                { msg = "Prediction: " + pred; }
-
-  $("#result").empty().append(msg);
-}

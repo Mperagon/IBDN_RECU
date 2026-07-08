@@ -1,0 +1,25 @@
+# Copiamos los binarios de Hadoop desde la imagen oficial
+FROM apache/hadoop:3 AS hadoop-src
+
+# Base real: Spark 3.5.3 (Ubuntu, Java 11, Python 3)
+FROM apache/spark:3.5.3
+
+USER root
+
+# Copiar Hadoop desde la etapa anterior
+COPY --from=hadoop-src /opt/hadoop /opt/hadoop
+
+ENV HADOOP_HOME=/opt/hadoop
+ENV PATH=$PATH:/opt/hadoop/bin:/opt/hadoop/sbin
+
+# Instalar dependencias ML para el driver Python en cluster mode
+RUN pip3 install --no-cache-dir \
+    "scikit-learn==1.3.2" \
+    mlflow \
+    boto3 \
+    pandas \
+    numpy \
+    joblib
+
+ENV PYSPARK_PYTHON=python3
+ENV PYSPARK_DRIVER_PYTHON=python3

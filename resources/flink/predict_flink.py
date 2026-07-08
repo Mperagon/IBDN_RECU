@@ -1,18 +1,16 @@
 import os
-import io
 import json
 import logging
 
-KAFKA_BROKER    = os.environ.get("KAFKA_BROKER",    "kafka:9092")
-MINIO_ENDPOINT  = os.environ.get("MINIO_ENDPOINT",  "http://minio:9000")
-MINIO_ACCESS    = os.environ.get("MINIO_ACCESS_KEY", "minioadmin")
-MINIO_SECRET    = os.environ.get("MINIO_SECRET_KEY", "minioadmin")
-MODEL_BUCKET    = "models"
-MODEL_KEY       = "sklearn_flight_model.joblib"
+KAFKA_BROKER  = os.environ.get("KAFKA_BROKER",        "kafka:9092")
+MLFLOW_URI    = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+MODEL_NAME    = "sklearn_flight_model"
+MODEL_STAGE   = "Production"
 
 from pyflink.datastream import StreamExecutionEnvironment
 from pyflink.datastream.connectors.kafka import (
     KafkaSource, KafkaSink, KafkaRecordSerializationSchema, KafkaOffsetsInitializer,
+    DeliveryGuarantee,
 )
 from pyflink.common import WatermarkStrategy, Types
 from pyflink.common.serialization import SimpleStringSchema
@@ -20,24 +18,16 @@ from pyflink.datastream.functions import MapFunction
 
 
 class FlightPredictFunction(MapFunction):
-    """Carga el modelo sklearn desde MinIO y predice retrasos de vuelos."""
+    """Carga el modelo sklearn desde MLflow Model Registry y predice retrasos."""
 
     def __init__(self):
         self._model = None
 
     def open(self, runtime_context):
-        import boto3, joblib
-        s3 = boto3.client(
-            "s3",
-            endpoint_url=MINIO_ENDPOINT,
-            aws_access_key_id=MINIO_ACCESS,
-            aws_secret_access_key=MINIO_SECRET,
-        )
-        buf = io.BytesIO()
-        s3.download_fileobj(MODEL_BUCKET, MODEL_KEY, buf)
-        buf.seek(0)
-        self._model = joblib.load(buf)
-        logging.info("Modelo sklearn cargado desde MinIO")
+        import mlflow.sklearn
+        mlflow.set_tracking_uri(MLFLOW_URI)
+        self._model = mlflow.sklearn.load_model("models:/{}/{}".format(MODEL_NAME, MODEL_STAGE))
+        logging.info("Modelo sklearn cargado desde MLflow registry (%s/%s)", MODEL_NAME, MODEL_STAGE)
 
     def map(self, message):
         import pandas as pd
@@ -73,7 +63,8 @@ class FlightPredictFunction(MapFunction):
 
 def main():
     env = StreamExecutionEnvironment.get_execution_environment()
-    env.set_parallelism(1)
+    env.set_parallelism(2)
+    env.enable_checkpointing(10000)
 
     kafka_source = (
         KafkaSource.builder()
@@ -100,6 +91,7 @@ def main():
     kafka_sink = (
         KafkaSink.builder()
         .set_bootstrap_servers(KAFKA_BROKER)
+        .set_delivery_guarantee(DeliveryGuarantee.AT_LEAST_ONCE)
         .set_record_serializer(
             KafkaRecordSerializationSchema.builder()
             .set_topic("flight-predictions")

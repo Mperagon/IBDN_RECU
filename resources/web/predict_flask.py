@@ -34,38 +34,44 @@ import datetime
 # Setup Kafka producer
 from kafka import KafkaProducer, KafkaConsumer
 producer = KafkaProducer(bootstrap_servers=[os.environ.get('KAFKA_BROKER', 'localhost:9092')],api_version=(0,10))
-PREDICTION_TOPIC = 'flight-delay-ml-request'
+PREDICTION_TOPIC        = 'flight-delay-ml-request'
 PREDICTION_RESULT_TOPIC = 'flight-predictions'
+SPARK_RESULT_TOPIC      = 'spark-flight-predictions'
 
-# Kafka consumer thread: reads predictions, saves to Cassandra, emits WebSocket
-def start_prediction_consumer():
+def _kafka_consumer(topic, group_id, ws_event):
   consumer = KafkaConsumer(
-    PREDICTION_RESULT_TOPIC,
+    topic,
     bootstrap_servers=[os.environ.get('KAFKA_BROKER', 'localhost:9092')],
     value_deserializer=lambda m: json.loads(m.decode('utf-8')),
     auto_offset_reset='latest',
-    group_id='flask-websocket-consumer'
+    group_id=group_id
   )
   for message in consumer:
     data = message.value
-    try:
-      ts = datetime.datetime.fromisoformat(data['Timestamp'].replace('Z', '+00:00')) \
-           if isinstance(data.get('Timestamp'), str) else None
-      cassandra_session.execute(cassandra_insert, (
-        data.get('UUID'),
-        str(float(data.get('Prediction', 0))),
-        ts,
-        data.get('Origin'),
-        data.get('Dest'),
-        data.get('Carrier'),
-        float(data.get('DepDelay', 0))
-      ))
-    except Exception as e:
-      print(f"Cassandra insert error: {e}", file=sys.stderr)
-    socketio.emit('prediction', data, namespace='/')
+    if ws_event == 'prediction_flink':
+      try:
+        ts = datetime.datetime.fromisoformat(data['Timestamp'].replace('Z', '+00:00')) \
+             if isinstance(data.get('Timestamp'), str) else None
+        cassandra_session.execute(cassandra_insert, (
+          data.get('UUID'),
+          str(float(data.get('Prediction', 0))),
+          ts,
+          data.get('Origin'),
+          data.get('Dest'),
+          data.get('Carrier'),
+          float(data.get('DepDelay', 0))
+        ))
+      except Exception as e:
+        print(f"Cassandra insert error: {e}", file=sys.stderr)
+    socketio.emit(ws_event, data, namespace='/')
 
-_consumer_thread = threading.Thread(target=start_prediction_consumer, daemon=True)
-_consumer_thread.start()
+threading.Thread(target=_kafka_consumer,
+  args=(PREDICTION_RESULT_TOPIC, 'flask-flink-consumer', 'prediction_flink'),
+  daemon=True).start()
+
+threading.Thread(target=_kafka_consumer,
+  args=(SPARK_RESULT_TOPIC, 'flask-spark-consumer', 'prediction_spark'),
+  daemon=True).start()
 
 import uuid
 

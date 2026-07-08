@@ -1,5 +1,6 @@
 # ServiceAccount + Role + RoleBinding para que Airflow pueda crear pods
-# via KubernetesPodOperator
+# via KubernetesPodOperator, y para que Spark pueda crear executor pods
+# via Spark on Kubernetes (--master k8s://...)
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -31,4 +32,41 @@ subjects:
 roleRef:
   kind: Role
   name: airflow-pod-manager
+  apiGroup: rbac.authorization.k8s.io
+---
+# ServiceAccount para los pods de Spark (driver + executors)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spark
+  namespace: flight-prediction
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: spark-pod-manager
+  namespace: flight-prediction
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps"]
+    verbs: ["create", "get", "list", "watch", "delete", "deletecollection", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "delete", "deletecollection"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spark-pod-manager
+  namespace: flight-prediction
+subjects:
+  - kind: ServiceAccount
+    name: spark
+    namespace: flight-prediction
+roleRef:
+  kind: Role
+  name: spark-pod-manager
   apiGroup: rbac.authorization.k8s.io

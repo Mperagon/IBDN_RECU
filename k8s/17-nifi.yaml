@@ -52,5 +52,4 @@ spec:
   ports:
     - port: 8080
       targetPort: 8080
-      nodePort: 30850
-  type: NodePort
+  type: LoadBalancer

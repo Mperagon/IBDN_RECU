@@ -11,7 +11,9 @@ RUN pip3 install --no-cache-dir \
     joblib \
     boto3 \
     numpy \
-    pandas
+    pandas \
+    mlflow \
+    mlflow
 
 # Kafka SQL connector (incluye kafka-clients)
 RUN curl -fsSL \

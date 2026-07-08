@@ -63,19 +63,7 @@ bash resources/download_data.sh
 
 Descarga `data/simple_flight_delay_features.jsonl.bz2` y `data/origin_dest_distances.jsonl`. Puede tardar varios minutos.
 
-### 3. Compilar el JAR de inferencia Spark
-
-Requiere `sbt` instalado:
-
-```bash
-cd flight_prediction
-sbt package
-cd ..
-```
-
-El JAR queda en `flight_prediction/target/scala-2.12/flight_prediction_2.12-0.1.jar`.
-
-### 4. Levantar todos los servicios
+### 3. Levantar todos los servicios
 
 ```bash
 docker compose up -d --build
@@ -96,7 +84,7 @@ Los siguientes contenedores aparecerán como `Exited (0)` — es normal, son de 
 | `cassandra-init` | Crea el keyspace `flight_data` y las tablas en Cassandra |
 | `nifi-init` | Configura el flujo NiFi via REST API (`GetFile → SplitText → EvaluateJsonPath → ReplaceText → PutCassandraQL`) |
 | `cassandra-nifi-wait` | Espera a que NiFi termine de cargar las 4696 distancias en Cassandra |
-| `minio-init` | Sube el JAR, el script de entrenamiento y los datos brutos a MinIO; configura buckets públicos |
+| `minio-init` | Sube el script de entrenamiento y los datos brutos a MinIO; configura buckets públicos |
 | `airflow-init` | Crea el esquema de base de datos de Airflow y el usuario admin |
 
 > **NiFi** (`apache/nifi:1.23.2`) carga automáticamente `data/origin_dest_distances.jsonl` en Cassandra mediante un pipeline de datos. La UI está disponible en `http://localhost:8085/nifi`.
@@ -109,16 +97,18 @@ Flask **no arrancará** hasta que `cassandra-nifi-wait` confirme que los datos e
 
 Una vez que todos los contenedores de inicialización hayan terminado (`Exited (0)`), solo queda:
 
-### Paso 1 — Crear tabla Iceberg en MinIO
+### Paso 1 — Crear tabla Iceberg en MinIO *(solo la primera vez)*
 
-Convierte los datos brutos (subidos a MinIO por `minio-init`) al formato Parquet/Iceberg. Tarda varios minutos:
+Convierte los datos brutos al formato Parquet/Iceberg. Los datos persisten en MinIO aunque reinicies los contenedores, por lo que este paso **no es necesario repetirlo**. Tarda varios minutos:
 
 ```bash
-docker exec -u root spark-master /opt/spark/bin/spark-submit \
-  --master spark://spark-master:7077 \
-  --conf spark.driver.host=spark-master \
-  --packages "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262" \
-  http://minio:9000/flight-data/scripts/create_iceberg_table.py 2>&1 | grep -E "Filas|total|OK|ERROR"
+docker cp resources/create_iceberg_table.py spark-master:/tmp/create_iceberg_table.py
+
+docker exec spark-master spark-submit \
+  --master yarn \
+  --deploy-mode cluster \
+  --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262 \
+  /tmp/create_iceberg_table.py
 ```
 
 Debe terminar con:
@@ -127,7 +117,7 @@ Filas leidas: 457013
 OK - Tabla Iceberg creada en s3a://flight-data/iceberg/flight_features
 ```
 
-> **Nota:** el script se lee directamente desde MinIO (`http://minio:9000/flight-data/scripts/...`), sin acceso a disco local.
+
 
 ### Paso 2 — Entrenar el modelo con Airflow
 
@@ -143,11 +133,7 @@ Una vez completado, los modelos quedan en `s3a://models/` y las métricas en MLf
 
 ### Verificar el modo distribuido
 
-Comprueba en la **Spark Master UI** (`http://localhost:8080`) que el job de inferencia aparece bajo **Drivers** (no bajo Applications). Esto confirma que el driver corre en el clúster con `--deploy-mode cluster`.
-
-```bash
-docker compose logs spark-job --tail 20
-```
+Comprueba en la **YARN ResourceManager UI** (`http://localhost:8088`) que los jobs aparecen como aplicaciones YARN en estado `RUNNING` o `FINISHED`. Esto confirma que el driver corre en los NodeManagers con `--deploy-mode cluster`.
 
 ---
 
@@ -195,7 +181,7 @@ Abre el navegador en `http://localhost:5001/flights/delays/predict_kafka`, relle
 | NiFi             | http://localhost:8085   | —                       |
 | Airflow          | http://localhost:8081   | admin / admin           |
 | MLflow           | http://localhost:5000   | —                       |
-| Spark Master UI  | http://localhost:8080   | —                       |
+| YARN ResourceManager | http://localhost:8088 | —                     |
 | MinIO Console    | http://localhost:9001   | minioadmin / minioadmin |
 | Kibana           | http://localhost:5601   | —                       |
 | Elasticsearch    | http://localhost:9200   | —                       |
@@ -210,7 +196,7 @@ Abre el navegador en `http://localhost:5001/flights/delays/predict_kafka`, relle
 | NiFi           | 8085       |
 | Airflow        | 8081       |
 | MLflow         | 5000       |
-| Spark Master   | 8080, 7077 |
+| YARN ResourceManager | 8088  |
 | MinIO API      | 9000       |
 | MinIO Web      | 9001       |
 | Kafka          | 9092       |
@@ -227,26 +213,8 @@ Abre el navegador en `http://localhost:5001/flights/delays/predict_kafka`, relle
 
 #### Requisitos previos
 
-- Docker Desktop con Kubernetes activado: **Settings → Kubernetes → Enable Kubernetes**
-- El JAR compilado en `flight_prediction/target/scala-2.12/flight_prediction_2.12-0.1.jar`
-- Los datos descargados en `data/`
-
----
-
-> ⚠️ **IMPORTANTE — evitar conflictos de puertos entre K8s y Docker Compose**
->
-> K8s y Docker Compose **no pueden correr a la vez** — comparten puertos del host.
->
-> - **Antes de arrancar K8s**: para Docker Compose primero:
->   ```bash
->   docker compose down
->   ```
-> - **Antes de arrancar Docker Compose**: elimina el namespace de K8s y espera a que libere los puertos:
->   ```bash
->   kubectl delete namespace flight-prediction
->   # Espera hasta que el comando termine completamente
->   docker compose up -d
->   ```
+- Docker Desktop con Kubernetes activado (cluster kind multi-nodo recomendado)
+- Los datos descargados en `data/` (ejecutar `bash resources/download_data.sh`)
 
 ---
 
@@ -256,72 +224,67 @@ Abre el navegador en `http://localhost:5001/flights/delays/predict_kafka`, relle
 bash k8s/deploy.sh
 ```
 
-El script realiza automáticamente:
-1. Construye las imágenes Docker personalizadas (Flask, MLflow, Airflow, **Flink**)
-2. Aplica todos los manifiestos de Kubernetes
+El script realiza automáticamente (~20-30 min):
+1. Construye las imágenes Docker personalizadas (Flask, MLflow, Airflow, Spark, Flink)
+2. Aplica todos los manifiestos de Kubernetes en el namespace `flight-prediction`
 3. Espera a que Cassandra esté lista e inicializa el esquema
-4. Sube el JAR, scripts y datos de entrenamiento a MinIO
-5. Despliega NiFi y configura el flujo de carga de distancias via API REST
-6. Espera a que NiFi cargue las 4696 distancias en Cassandra antes de arrancar Flask
+4. Sube scripts y datos de entrenamiento a MinIO
+5. Despliega NiFi y espera a que cargue las 4696 distancias origen-destino en Cassandra
+6. Crea la tabla Iceberg en MinIO automáticamente (job `iceberg-init`)
 7. Despliega el cluster Flink (jobmanager + taskmanager + job-submitter)
+8. Despliega Spark History Server y Spark Streaming Job (cluster mode K8s)
+9. Lanza el DAG de entrenamiento en Airflow automáticamente
 
 > NiFi puede tardar **15-20 minutos** en cargar las 4696 distancias. El script espera automáticamente.
 
-#### 2. Crear tabla Iceberg
+#### 2. Entrenar el modelo con Airflow
 
-Una vez el script haya terminado, crea la tabla Iceberg ejecutando:
+El deploy.sh lanza el DAG automáticamente. Puedes seguirlo en Airflow:
 
-```bash
-SPARK_POD=$(kubectl get pod -l app=spark-master -n flight-prediction -o jsonpath='{.items[0].metadata.name}')
-kubectl exec -n flight-prediction $SPARK_POD -- bash -c '
-export SPARK_DRIVER_HOST=$(hostname -i)
-/opt/spark/bin/spark-submit \
-  --master spark://spark-master:7077 \
-  --conf spark.executor.memory=512m \
-  --conf spark.executor.memoryOverhead=128m \
-  --packages "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262" \
-  /tmp/create_iceberg_table.py
-'
-```
-
-Tarda varios minutos. Debe terminar con:
-```
-OK - Tabla Iceberg creada en s3a://flight-data/iceberg/flight_features
-     457013 filas almacenadas en formato Parquet/Iceberg
-```
-
-#### 3. Entrenar el modelo con Airflow
-
-1. Abre **Airflow** en `http://localhost:30808` (admin / admin)
-2. Activa el DAG `agile_data_science_batch_prediction_model_training`
-3. Pulsa **Trigger DAG** (▶)
-4. Espera a que las 3 tareas estén en verde (~10-60 minutos):
-   - `check_spark` — verifica que el clúster Spark funciona
-   - `train_model` — entrena el Random Forest (Spark MLlib) y el modelo sklearn, guarda ambos en MinIO
+1. Abre **Airflow** (ver URLs abajo, admin / admin)
+2. Activa el DAG `agile_data_science_batch_prediction_model_training` si no está activo
+3. Espera a que las 3 tareas estén en verde (~10-60 minutos):
+   - `check_spark` — verifica que Spark on K8s funciona
+   - `train_model` — entrena Random Forest (Spark MLlib) + sklearn, guarda en MinIO
    - `register_mlflow` — verifica las métricas en MLflow
 
-Una vez completado, el job de **Flink** detecta el modelo sklearn en MinIO (`models/sklearn_flight_model.joblib`) y empieza a procesar predicciones en tiempo real desde Kafka.
+Una vez completado, **Flink** detecta el modelo en MLflow (Production) y **Spark Streaming** detecta el modelo en Iceberg — ambos empiezan a procesar predicciones desde Kafka automáticamente.
 
-#### URLs de los servicios (K8s — NodePort)
+#### 3. Acceder a los servicios (Windows + Docker Desktop)
 
-| Servicio         | URL                          | Credenciales            |
-|------------------|------------------------------|-------------------------|
-| Flask            | http://localhost:30501       | —                       |
-| NiFi             | http://localhost:30850/nifi  | —                       |
-| Airflow          | http://localhost:30808       | admin / admin           |
-| MLflow           | http://localhost:30500       | —                       |
-| Spark UI         | http://localhost:30080       | —                       |
-| MinIO Console    | http://localhost:30901       | minioadmin / minioadmin |
-| Kibana           | http://localhost:30561       | —                       |
-| **Flink UI**     | **http://localhost:30082**   | —                       |
+En Docker Desktop con WSL2 los NodePorts no se exponen automáticamente. Usa el script de port-forwards incluido.
 
-#### Limpiar el despliegue
+Abre **PowerShell de Windows** y ejecuta:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+cd \\wsl.localhost\Ubuntu\home\migue\practica_creativa
+.\start-portforwards.ps1
+```
+
+| Servicio             | URL                                                | Credenciales            |
+|----------------------|----------------------------------------------------|-------------------------|
+| Flask (predicciones) | http://localhost:5001/flights/delays/predict_kafka | —                       |
+| Airflow              | http://localhost:8080                              | admin / admin           |
+| MLflow               | http://localhost:5000                              | —                       |
+| Kibana               | http://localhost:5601                              | —                       |
+| Flink UI             | http://localhost:8081                              | —                       |
+| Spark History Server | http://localhost:18080                             | —                       |
+| NiFi                 | http://localhost:8850/nifi                         | —                       |
+| MinIO Console        | http://localhost:9001                              | minioadmin / minioadmin |
+
+Para parar los port-forwards:
+```powershell
+Stop-Job * ; Remove-Job *
+```
+
+#### 4. Limpiar el despliegue
 
 ```bash
 kubectl delete namespace flight-prediction
 ```
 
-Esto elimina todos los recursos (pods, servicios, PVCs) y libera los puertos del host.
+Esto elimina todos los recursos (pods, servicios, PVCs).
 
 ### Google Kubernetes Engine (GKE)
 

@@ -6,8 +6,10 @@ metadata:
 data:
   setup_flow.py: |
     import requests, time, sys
-    NIFI_URL = "http://nifi:8080/nifi-api"
-    MINIO_URL = "http://minio:9000/flight-data/raw/origin_dest_distances.jsonl"
+
+    NIFI_URL   = "http://nifi:8080/nifi-api"
+    MINIO_URL  = "http://minio:9000/flight-data/raw/origin_dest_distances.jsonl"
+    BATCH_SIZE = 100
     HDR = {"Content-Type": "application/json"}
 
     def wait_for_nifi():
@@ -19,7 +21,7 @@ data:
                     print("NiFi listo.")
                     return
             except Exception as e:
-                print(f"  Esperando NiFi... ({attempt+1}/40): {e}")
+                print(f"  ({attempt+1}/40): {e}")
             time.sleep(15)
         sys.exit("ERROR: NiFi no respondio a tiempo")
 
@@ -28,14 +30,52 @@ data:
         r.raise_for_status()
         return r.json()["processGroupFlow"]["id"]
 
-    def create_processor(pg_id, proc_type, name, properties, position, auto_terminate=None):
+    def cleanup_existing_flow(pg_id):
+        r = requests.get(f"{NIFI_URL}/process-groups/{pg_id}/processors", headers=HDR)
+        if not r.ok:
+            return
+        processors = r.json().get("processors", [])
+        if not processors:
+            return
+        print("  Limpiando flow existente...")
+        for proc in processors:
+            requests.put(
+                f"{NIFI_URL}/processors/{proc['id']}/run-status", headers=HDR,
+                json={"revision": {"version": proc["revision"]["version"]},
+                      "state": "STOPPED", "disconnectedNodeAcknowledged": False}
+            )
+        time.sleep(3)
+        r = requests.get(f"{NIFI_URL}/process-groups/{pg_id}/connections", headers=HDR)
+        if r.ok:
+            for conn in r.json().get("connections", []):
+                requests.post(f"{NIFI_URL}/flowfile-queues/{conn['id']}/drop-requests", headers=HDR)
+                time.sleep(0.3)
+                requests.delete(
+                    f"{NIFI_URL}/connections/{conn['id']}?version={conn['revision']['version']}",
+                    headers=HDR
+                )
+        time.sleep(1)
+        for proc in processors:
+            r_get = requests.get(f"{NIFI_URL}/processors/{proc['id']}", headers=HDR)
+            if r_get.ok:
+                version = r_get.json()["revision"]["version"]
+                requests.delete(f"{NIFI_URL}/processors/{proc['id']}?version={version}", headers=HDR)
+        print("  Flow existente eliminado.")
+
+    def create_processor(pg_id, proc_type, name, properties, position,
+                         auto_terminate=None, concurrent_tasks=1):
         body = {
             "revision": {"version": 0},
             "component": {
                 "type": proc_type, "name": name,
                 "position": {"x": position[0], "y": position[1]},
-                "config": {"properties": properties, "schedulingStrategy": "TIMER_DRIVEN",
-                           "schedulingPeriod": "1 sec", "autoTerminatedRelationships": auto_terminate or []}
+                "config": {
+                    "properties": properties,
+                    "schedulingStrategy": "TIMER_DRIVEN",
+                    "schedulingPeriod": "1 sec",
+                    "concurrentlySchedulableTaskCount": concurrent_tasks,
+                    "autoTerminatedRelationships": auto_terminate or []
+                }
             }
         }
         r = requests.post(f"{NIFI_URL}/process-groups/{pg_id}/processors", headers=HDR, json=body)
@@ -60,61 +100,133 @@ data:
         r.raise_for_status()
         print(f"  Conexion creada: {relationships}")
 
-    def get_processor_state(proc_id):
+    def get_version(proc_id):
         r = requests.get(f"{NIFI_URL}/processors/{proc_id}", headers=HDR)
         r.raise_for_status()
-        data = r.json()
-        return data["revision"]["version"], data["component"].get("validationErrors", [])
+        return r.json()["revision"]["version"]
 
     def start_processor(proc_id):
-        version, errors = get_processor_state(proc_id)
-        if errors:
-            print(f"  ADVERTENCIA validacion {proc_id}: {errors}")
-        body = {"revision": {"version": version}, "state": "RUNNING", "disconnectedNodeAcknowledged": False}
+        version = get_version(proc_id)
+        body = {"revision": {"version": version}, "state": "RUNNING",
+                "disconnectedNodeAcknowledged": False}
         r = requests.put(f"{NIFI_URL}/processors/{proc_id}/run-status", headers=HDR, json=body)
-        r.raise_for_status()
-        print(f"  Procesador iniciado: {proc_id}")
+        if not r.ok:
+            print(f"  WARN al iniciar {proc_id}: {r.text[:200]}")
+        else:
+            print(f"  Iniciado: {proc_id}")
 
+    # ── Main ──────────────────────────────────────────────────────────────────
+    print(f"=== Configurando NiFi: MinIO -> Cassandra (BATCH {BATCH_SIZE}) ===")
     wait_for_nifi()
     pg_id = get_root_pg_id()
-    print(f"Root Process Group: {pg_id}")
+    print(f"Root PG: {pg_id}")
+    cleanup_existing_flow(pg_id)
 
-    generate = create_processor(pg_id, "org.apache.nifi.processors.standard.GenerateFlowFile", "GenerateFlowFile",
-        {"File Size": "0 B", "Batch Size": "1", "Data Format": "Text", "Unique FlowFiles": "false"}, position=(0, 0))
-    invoke_http = create_processor(pg_id, "org.apache.nifi.processors.standard.InvokeHTTP", "InvokeHTTP - MinIO",
-        {"HTTP Method": "GET", "Remote URL": MINIO_URL, "Connection Timeout": "10 secs", "Read Timeout": "30 secs"},
-        position=(300, 0), auto_terminate=["Original", "Retry", "No Retry", "Failure"])
-    split_text = create_processor(pg_id, "org.apache.nifi.processors.standard.SplitText", "SplitText",
-        {"Line Split Count": "1", "Header Line Count": "0", "Remove Trailing Newlines": "true"},
-        position=(600, 0), auto_terminate=["original", "failure"])
-    evaluate_json = create_processor(pg_id, "org.apache.nifi.processors.standard.EvaluateJsonPath", "EvaluateJsonPath",
+    print("Creando procesadores...")
+
+    generate = create_processor(pg_id,
+        "org.apache.nifi.processors.standard.GenerateFlowFile",
+        "GenerateFlowFile - disparador",
+        {"File Size": "0 B", "Batch Size": "1", "Data Format": "Text",
+         "Unique FlowFiles": "false"},
+        position=(0, 0))
+
+    invoke_http = create_processor(pg_id,
+        "org.apache.nifi.processors.standard.InvokeHTTP",
+        "InvokeHTTP - descargar desde MinIO",
+        {"HTTP Method": "GET", "Remote URL": MINIO_URL,
+         "Connection Timeout": "10 secs", "Read Timeout": "30 secs"},
+        position=(300, 0),
+        auto_terminate=["Original", "Retry", "No Retry", "Failure"])
+
+    split_text = create_processor(pg_id,
+        "org.apache.nifi.processors.standard.SplitText",
+        "SplitText - una linea por registro",
+        {"Line Split Count": "1", "Header Line Count": "0",
+         "Remove Trailing Newlines": "true"},
+        position=(600, 0),
+        auto_terminate=["original", "failure"])
+
+    evaluate_json = create_processor(pg_id,
+        "org.apache.nifi.processors.standard.EvaluateJsonPath",
+        "EvaluateJsonPath - extraer campos",
         {"Destination": "flowfile-attribute", "Return Type": "scalar",
          "origin": "$.Origin", "dest": "$.Dest", "distance": "$.Distance"},
-        position=(900, 0), auto_terminate=["failure", "unmatched"])
-    cql = "INSERT INTO origin_dest_distances(origin, dest, distance) VALUES ('${origin}', '${dest}', ${distance})"
-    replace_text = create_processor(pg_id, "org.apache.nifi.processors.standard.ReplaceText", "ReplaceText",
+        position=(900, 0),
+        auto_terminate=["failure", "unmatched"])
+
+    cql = ("INSERT INTO origin_dest_distances(origin, dest, distance) "
+           "VALUES ('${origin}', '${dest}', ${distance});\n")
+    replace_cql = create_processor(pg_id,
+        "org.apache.nifi.processors.standard.ReplaceText",
+        "ReplaceText - CQL INSERT",
         {"Replacement Value": cql, "Replacement Strategy": "Always Replace",
          "Evaluation Mode": "Entire text", "Character Set": "UTF-8"},
-        position=(1200, 0), auto_terminate=["failure"])
-    put_cassandra = create_processor(pg_id, "org.apache.nifi.processors.cassandra.PutCassandraQL", "PutCassandraQL",
+        position=(1200, 0),
+        auto_terminate=["failure"])
+
+    merge_content = create_processor(pg_id,
+        "org.apache.nifi.processors.standard.MergeContent",
+        f"MergeContent - agrupar {BATCH_SIZE} registros",
+        {"Merge Strategy": "Bin-Packing Algorithm",
+         "Merge Format": "Binary Concatenation",
+         "Minimum Number of Entries": str(BATCH_SIZE),
+         "Maximum Number of Entries": str(BATCH_SIZE),
+         "Max Bin Age": "30 sec",
+         "Delimiter Strategy": "Do Not Use Delimiters"},
+        position=(1500, 0),
+        auto_terminate=["failure", "original"])
+
+    prepend_batch = create_processor(pg_id,
+        "org.apache.nifi.processors.standard.ReplaceText",
+        "ReplaceText - BEGIN BATCH",
+        {"Replacement Value": "BEGIN BATCH\n",
+         "Replacement Strategy": "Prepend",
+         "Evaluation Mode": "Entire text", "Character Set": "UTF-8"},
+        position=(1800, 0),
+        auto_terminate=["failure"])
+
+    append_batch = create_processor(pg_id,
+        "org.apache.nifi.processors.standard.ReplaceText",
+        "ReplaceText - APPLY BATCH",
+        {"Replacement Value": "\nAPPLY BATCH;",
+         "Replacement Strategy": "Append",
+         "Evaluation Mode": "Entire text", "Character Set": "UTF-8"},
+        position=(2100, 0),
+        auto_terminate=["failure"])
+
+    put_cassandra = create_processor(pg_id,
+        "org.apache.nifi.processors.cassandra.PutCassandraQL",
+        "PutCassandraQL - BATCH Cassandra",
         {"Cassandra Contact Points": "cassandra:9042", "Keyspace": "flight_data"},
-        position=(1500, 0), auto_terminate=["success", "failure", "retry"])
+        position=(2400, 0),
+        auto_terminate=["success", "failure", "retry"],
+        concurrent_tasks=4)
 
-    create_connection(pg_id, generate["id"], invoke_http["id"], ["success"])
-    create_connection(pg_id, invoke_http["id"], split_text["id"], ["Response"])
-    create_connection(pg_id, split_text["id"], evaluate_json["id"], ["splits"])
-    create_connection(pg_id, evaluate_json["id"], replace_text["id"], ["matched"])
-    create_connection(pg_id, replace_text["id"], put_cassandra["id"], ["success"])
+    print("Creando conexiones...")
+    create_connection(pg_id, generate["id"],      invoke_http["id"],    ["success"])
+    create_connection(pg_id, invoke_http["id"],   split_text["id"],     ["Response"])
+    create_connection(pg_id, split_text["id"],    evaluate_json["id"],  ["splits"])
+    create_connection(pg_id, evaluate_json["id"], replace_cql["id"],    ["matched"])
+    create_connection(pg_id, replace_cql["id"],   merge_content["id"],  ["success"])
+    create_connection(pg_id, merge_content["id"], prepend_batch["id"],  ["merged"])
+    create_connection(pg_id, prepend_batch["id"], append_batch["id"],   ["success"])
+    create_connection(pg_id, append_batch["id"],  put_cassandra["id"],  ["success"])
 
-    version, _ = get_processor_state(generate["id"])
+    version = get_version(generate["id"])
     requests.put(f"{NIFI_URL}/processors/{generate['id']}", headers=HDR,
         json={"revision": {"version": version}, "component": {"id": generate["id"],
-              "config": {"schedulingPeriod": "3600 sec", "schedulingStrategy": "TIMER_DRIVEN"}}})
+              "config": {"schedulingPeriod": "3600 sec",
+                         "schedulingStrategy": "TIMER_DRIVEN"}}})
+    print("  GenerateFlowFile: scheduling 3600s")
 
+    print("Arrancando procesadores...")
     time.sleep(2)
-    for p in [put_cassandra, replace_text, evaluate_json, split_text, invoke_http, generate]:
+    for p in [put_cassandra, append_batch, prepend_batch, merge_content,
+              replace_cql, evaluate_json, split_text, invoke_http, generate]:
         start_processor(p["id"])
-    print("=== Flujo NiFi activo. Leyendo distancias desde MinIO -> Cassandra ===")
+
+    print(f"=== Flujo NiFi activo (BATCH {BATCH_SIZE}: ~47 ops en vez de 4700) ===")
 ---
 apiVersion: batch/v1
 kind: Job

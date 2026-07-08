@@ -1,13 +1,11 @@
 {% extends "layout.html" %}
 {% block body %}
-  <!-- Navigation guide -->
   / <a href="/flights/delays/predict_kafka">Flight Delay Prediction with Kafka</a>
 
-  <p class="lead" style="margin: 10px; margin-left: 0px;">
+  <p class="lead" style="margin: 10px 0;">
     Predicting Flight Delays with Kafka + WebSockets
   </p>
 
-  <!-- Generate form from search_config and request args -->
   <form id="flight_delay_classification" action="/flights/delays/predict/classify_realtime" method="post">
     {% for item in form_config %}
       {% if 'label' in item %}
@@ -16,20 +14,22 @@
         <label for="{{item['field']}}">{{item['field']}}</label>
       {% endif %}
         <input name="{{item['field']}}" style="width: 36px; margin-right: 10px;"
-        {% if 'value' in item %}
-          value="{{item['value']}}"
-        {% endif %}
-        ></input>
+        {% if 'value' in item %}value="{{item['value']}}"{% endif %}></input>
     {% endfor %}
-    <button type="submit" class="btn btn-xs btn-default" style="height: 25px">Submit</button>
+    <button type="submit" class="btn btn-xs btn-default" style="height:25px">Submit</button>
   </form>
 
-  <div style="margin-top: 10px;">
-      <p>Delay: <span id="result" style="display: inline-block;"></span></p>
+  <div style="margin-top:20px;display:flex;gap:40px;max-width:860px;">
+    <div style="flex:1;border:2px solid #27ae60;border-radius:6px;padding:14px;">
+      <h4 style="margin-top:0;color:#27ae60;">Flink</h4>
+      <p style="margin:0;">Delay: <span id="result_flink" style="font-weight:bold;"></span></p>
+    </div>
+    <div style="flex:1;border:2px solid #8e44ad;border-radius:6px;padding:14px;">
+      <h4 style="margin-top:0;color:#8e44ad;">Spark Streaming</h4>
+      <p style="margin:0;">Delay: <span id="result_spark" style="font-weight:bold;"></span></p>
+    </div>
   </div>
 
-  <!-- Socket.IO client -->
   <script src="https://cdn.socket.io/4.6.0/socket.io.min.js"></script>
-  <!-- WebSocket-based prediction handler -->
   <script src="/static/flight_delay_predict_ws.js"></script>
 {% endblock %}

@@ -17,8 +17,8 @@ spec:
       containers:
         - name: flink-jobmanager
           image: flink-custom:1.18.1
-          imagePullPolicy: Never
-          command: ["/opt/flink/bin/flink-daemon.sh", "start-foreground", "jobmanager"]
+          imagePullPolicy: IfNotPresent
+          args: ["jobmanager"]
           ports:
             - containerPort: 8081
             - containerPort: 6123
@@ -52,11 +52,13 @@ spec:
     - name: ui
       port: 8081
       targetPort: 8081
-      nodePort: 30082
     - name: rpc
       port: 6123
       targetPort: 6123
-  type: NodePort
+    - name: blob
+      port: 6124
+      targetPort: 6124
+  type: LoadBalancer
 ---
 # Flink TaskManager
 apiVersion: apps/v1
@@ -65,7 +67,7 @@ metadata:
   name: flink-taskmanager
   namespace: flight-prediction
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: flink-taskmanager
@@ -77,14 +79,22 @@ spec:
       containers:
         - name: flink-taskmanager
           image: flink-custom:1.18.1
-          imagePullPolicy: Never
-          command: ["/opt/flink/bin/flink-daemon.sh", "start-foreground", "taskmanager"]
+          imagePullPolicy: IfNotPresent
+          args: ["taskmanager"]
           env:
             - name: FLINK_PROPERTIES
               value: |
                 jobmanager.rpc.address: flink-jobmanager
                 taskmanager.numberOfTaskSlots: 4
                 python.executable: python3
+            - name: MLFLOW_TRACKING_URI
+              value: http://mlflow:5000
+            - name: MLFLOW_S3_ENDPOINT_URL
+              value: http://minio:9000
+            - name: AWS_ACCESS_KEY_ID
+              value: minioadmin
+            - name: AWS_SECRET_ACCESS_KEY
+              value: minioadmin
           resources:
             requests:
               memory: 1Gi
@@ -104,18 +114,14 @@ spec:
       containers:
         - name: flink-job
           image: flink-custom:1.18.1
-          imagePullPolicy: Never
+          imagePullPolicy: IfNotPresent
           command:
             - bash
             - -c
             - |
-              until curl -sf http://minio:9000/models/sklearn_flight_model.joblib -o /dev/null; do
-                echo 'Esperando modelo sklearn en MinIO...'
+              until python3 -c 'import mlflow,sys; mlflow.set_tracking_uri("http://mlflow:5000"); c=mlflow.tracking.MlflowClient(); v=c.get_latest_versions("sklearn_flight_model",stages=["Production"]); sys.exit(0 if v else 1)' 2>/dev/null; do
+                echo 'Esperando modelo sklearn en MLflow registry (Production)...'
                 sleep 30
-              done
-              until curl -sf http://flink-jobmanager:8081/overview -o /dev/null; do
-                echo 'Esperando Flink JobManager...'
-                sleep 10
               done
               RUNNING=$(curl -sf http://flink-jobmanager:8081/jobs | python3 -c \
                 "import sys,json; jobs=json.load(sys.stdin).get('jobs',[]); print('YES' if any(j.get('status')=='RUNNING' for j in jobs) else 'NO')" 2>/dev/null || echo NO)
@@ -123,18 +129,30 @@ spec:
                 echo 'Flink job ya en ejecucion'
                 exit 0
               fi
-              exec /opt/flink/bin/flink run \
+              /opt/flink/bin/flink run \
                 -m flink-jobmanager:8081 \
                 --python /opt/flink-job/predict_flink.py
+              JOB_ID=$(curl -sf http://flink-jobmanager:8081/jobs | python3 -c \
+                "import sys,json; jobs=[j for j in json.load(sys.stdin).get('jobs',[]) if j.get('status')=='RUNNING']; print(jobs[0]['id'] if jobs else '')" 2>/dev/null || echo "")
+              if [ -z "$JOB_ID" ]; then
+                echo 'ERROR: job no arranco'
+                exit 1
+              fi
+              echo "Job $JOB_ID arrancado, monitorizando..."
+              while true; do
+                STATUS=$(curl -sf "http://flink-jobmanager:8081/jobs/$JOB_ID" | python3 -c \
+                  "import sys,json; print(json.load(sys.stdin).get('state','UNKNOWN'))" 2>/dev/null || echo UNKNOWN)
+                if [ "$STATUS" != "RUNNING" ]; then
+                  echo "Job $JOB_ID paso a estado $STATUS, reiniciando..."
+                  exit 1
+                fi
+                sleep 30
+              done
           env:
             - name: KAFKA_BROKER
               value: kafka:9092
-            - name: MINIO_ENDPOINT
-              value: http://minio:9000
-            - name: MINIO_ACCESS_KEY
-              value: minioadmin
-            - name: MINIO_SECRET_KEY
-              value: minioadmin
+            - name: MLFLOW_TRACKING_URI
+              value: http://mlflow:5000
           resources:
             requests:
               memory: 256Mi

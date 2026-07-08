@@ -1,222 +1,370 @@
-# !/usr/bin/env python
+#!/usr/bin/env python3
+"""
+Configura Apache NiFi via REST API para cargar origin_dest_distances.jsonl
+desde MinIO (Data Lakehouse) en Cassandra con inserciones en BATCH.
 
-import sys, os
+Flow: GenerateFlowFile → InvokeHTTP (MinIO) → SplitText → EvaluateJsonPath
+                       → ReplaceText (CQL INSERT) → MergeContent (100 registros)
+                       → ReplaceText (BEGIN BATCH) → ReplaceText (APPLY BATCH)
+                       → PutCassandraQL (ejecuta BATCH de 100 inserts)
+"""
 
-# Cargar JARs de Iceberg + S3A automáticamente aunque se invoque con "python3"
-os.environ.setdefault(
-    'PYSPARK_SUBMIT_ARGS',
-    '--packages '
-    'org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,'
-    'org.apache.hadoop:hadoop-aws:3.3.4,'
-    'com.amazonaws:aws-java-sdk-bundle:1.12.262 '
-    'pyspark-shell'
-)
+import requests
+import time
+import sys
 
-def main(base_path):
+NIFI_URL   = "http://nifi:8080/nifi-api"
+MINIO_URL  = "http://minio:9000/flight-data/raw/origin_dest_distances.jsonl"
+BATCH_SIZE = 100
+HDR = {"Content-Type": "application/json"}
 
-    try: base_path
-    except NameError: base_path = "."
-    if not base_path:
-        base_path = "."
 
-    APP_NAME = "train_spark_mllib_model.py"
-
-    MINIO_ENDPOINT = "http://minio:9000"
-    MINIO_ACCESS   = "minioadmin"
-    MINIO_SECRET   = "minioadmin"
-    MINIO_MODELS   = "s3a://models"
-
-    try:
-        sc and spark
-    except (NameError, UnboundLocalError):
+def wait_for_nifi():
+    print("Esperando que NiFi esté listo...")
+    for attempt in range(40):
         try:
-            import findspark
-            findspark.init()
-        except ImportError:
-            pass
-        import pyspark
-        import pyspark.sql
+            r = requests.get(f"{NIFI_URL}/system-diagnostics", timeout=10)
+            if r.status_code == 200:
+                print("NiFi listo.")
+                return
+            print(f"  NiFi respondió {r.status_code} ({attempt+1}/40)")
+        except Exception as e:
+            print(f"  Esperando NiFi... ({attempt+1}/40): {e}")
+        time.sleep(15)
+    sys.exit("ERROR: NiFi no respondió a tiempo")
 
-        _driver_host = os.environ.get("SPARK_DRIVER_HOST")
-        _b = pyspark.sql.SparkSession.builder \
-            .appName(APP_NAME) \
-            .master("spark://spark-master:7077")
-        if _driver_host:
-            _b = _b.config("spark.driver.host", _driver_host) \
-                   .config("spark.driver.bindAddress", "0.0.0.0")
-        spark = _b \
-            .config("spark.sql.extensions",
-                    "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
-            .config("spark.sql.catalog.minio_catalog",
-                    "org.apache.iceberg.spark.SparkCatalog") \
-            .config("spark.sql.catalog.minio_catalog.type", "hadoop") \
-            .config("spark.sql.catalog.minio_catalog.warehouse",
-                    "s3a://flight-data/iceberg") \
-            .config("spark.hadoop.fs.s3a.endpoint",           MINIO_ENDPOINT) \
-            .config("spark.hadoop.fs.s3a.access.key",         MINIO_ACCESS) \
-            .config("spark.hadoop.fs.s3a.secret.key",         MINIO_SECRET) \
-            .config("spark.hadoop.fs.s3a.path.style.access",  "true") \
-            .config("spark.hadoop.fs.s3a.impl",
-                    "org.apache.hadoop.fs.s3a.S3AFileSystem") \
-            .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false") \
-            .getOrCreate()
-        sc = spark.sparkContext
 
-    spark.sparkContext.setLogLevel("WARN")
+def get_root_pg_id():
+    r = requests.get(f"{NIFI_URL}/flow/process-groups/root", headers=HDR)
+    r.raise_for_status()
+    return r.json()["processGroupFlow"]["id"]
 
-    from pyspark.sql.functions import lit, concat
 
-    # Leer datos de entrenamiento desde MinIO/Iceberg
-    print("Leyendo datos de entrenamiento desde MinIO/Iceberg...")
-    features = spark.sql("SELECT * FROM minio_catalog.flight_features")
-    features.first()
+def cleanup_existing_flow(pg_id):
+    """Para y elimina todos los procesadores y conexiones existentes."""
+    r = requests.get(f"{NIFI_URL}/process-groups/{pg_id}/processors", headers=HDR)
+    if not r.ok:
+        return
+    processors = r.json().get("processors", [])
+    if not processors:
+        return
 
-    null_counts = [(c, features.where(features[c].isNull()).count()) for c in features.columns]
-    print(list(filter(lambda x: x[1] > 0, null_counts)))
+    print("  Limpiando flow existente...")
 
-    features_with_route = features.withColumn(
-        'Route',
-        concat(features.Origin, lit('-'), features.Dest)
-    )
-    features_with_route.show(6)
-
-    from pyspark.ml.feature import Bucketizer
-
-    splits = [-float("inf"), -15.0, 0, 30.0, float("inf")]
-    arrival_bucketizer = Bucketizer(
-        splits=splits,
-        inputCol="ArrDelay",
-        outputCol="ArrDelayBucket"
-    )
-
-    arrival_bucketizer.write().overwrite().save(
-        "{}/arrival_bucketizer_2.0.bin".format(MINIO_MODELS))
-
-    ml_bucketized_features = arrival_bucketizer.transform(features_with_route)
-    ml_bucketized_features.select("ArrDelay", "ArrDelayBucket").show()
-
-    from pyspark.ml.feature import StringIndexer, VectorAssembler
-
-    for column in ["Carrier", "Origin", "Dest", "Route"]:
-        string_indexer = StringIndexer(inputCol=column, outputCol=column + "_index")
-        string_indexer_model = string_indexer.fit(ml_bucketized_features)
-        ml_bucketized_features = string_indexer_model.transform(ml_bucketized_features)
-        ml_bucketized_features = ml_bucketized_features.drop(column)
-
-        string_indexer_model.write().overwrite().save(
-            "{}/string_indexer_model_{}.bin".format(MINIO_MODELS, column))
-
-    numeric_columns = ["DepDelay", "Distance", "DayOfMonth", "DayOfWeek", "DayOfYear"]
-    index_columns   = ["Carrier_index", "Origin_index", "Dest_index", "Route_index"]
-    vector_assembler = VectorAssembler(
-        inputCols=numeric_columns + index_columns,
-        outputCol="Features_vec"
-    )
-    final_vectorized_features = vector_assembler.transform(ml_bucketized_features)
-
-    vector_assembler.write().overwrite().save(
-        "{}/numeric_vector_assembler.bin".format(MINIO_MODELS))
-
-    for column in index_columns:
-        final_vectorized_features = final_vectorized_features.drop(column)
-
-    final_vectorized_features.show()
-
-    from pyspark.ml.classification import RandomForestClassifier
-    rfc = RandomForestClassifier(
-        featuresCol="Features_vec",
-        labelCol="ArrDelayBucket",
-        predictionCol="Prediction",
-        maxBins=4657,
-        maxMemoryInMB=1024
-    )
-    model = rfc.fit(final_vectorized_features)
-
-    model.write().overwrite().save(
-        "{}/spark_random_forest_classifier.flight_delays.5.0.bin".format(MINIO_MODELS))
-
-    print("\n=== Modelos guardados en MinIO: {}/".format(MINIO_MODELS))
-
-    predictions = model.transform(final_vectorized_features)
-
-    from pyspark.ml.evaluation import MulticlassClassificationEvaluator
-    evaluator = MulticlassClassificationEvaluator(
-        predictionCol="Prediction",
-        labelCol="ArrDelayBucket",
-        metricName="accuracy"
-    )
-    accuracy = evaluator.evaluate(predictions)
-    print("Accuracy = {}".format(accuracy))
-
-    # MLflow tracking
-    import mlflow
-    mlflow_uri = os.environ.get('MLFLOW_TRACKING_URI', 'http://mlflow:5000')
-    mlflow.set_tracking_uri(mlflow_uri)
-    mlflow.set_experiment("flight_delay_prediction")
-    with mlflow.start_run():
-        mlflow.log_param("maxBins", 4657)
-        mlflow.log_param("maxMemoryInMB", 1024)
-        mlflow.log_metric("accuracy", accuracy)
-        print("MLflow: metricas registradas en {}".format(mlflow_uri))
-
-    predictions.groupBy("Prediction").count().show()
-    predictions.sample(False, 0.001, 18).orderBy("CRSDepTime").show(6)
-
-    # ── Modelo sklearn para Flink ────────────────────────────────────────────
-    print("\nEntrenando modelo sklearn para Flink...")
-    try:
-        import io as _io, boto3 as _boto3, numpy as _np, pandas as _pd
-        import joblib as _joblib
-        from sklearn.pipeline import Pipeline as _Pipeline
-        from sklearn.compose import ColumnTransformer as _ColumnTransformer
-        from sklearn.preprocessing import OrdinalEncoder as _OrdinalEncoder
-        from sklearn.ensemble import RandomForestClassifier as _SkRFC
-
-        sk_cat = ["Carrier", "Origin", "Dest", "Route"]
-        sk_num = ["DepDelay", "Distance", "DayOfMonth", "DayOfWeek", "DayOfYear"]
-
-        sk_pdf = (
-            features_with_route
-            .select(sk_cat + sk_num + ["ArrDelay"])
-            .dropna()
-            .sample(False, 0.3, 42)
-            .limit(200000)
-            .toPandas()
+    # Parar todos los procesadores
+    for proc in processors:
+        requests.put(
+            f"{NIFI_URL}/processors/{proc['id']}/run-status",
+            headers=HDR,
+            json={
+                "revision": {"version": proc["revision"]["version"]},
+                "state": "STOPPED",
+                "disconnectedNodeAcknowledged": False,
+            },
         )
+    time.sleep(3)
 
-        sk_pdf["ArrDelayBucket"] = _pd.cut(
-            sk_pdf["ArrDelay"],
-            bins=[-_np.inf, -15, 0, 30, _np.inf],
-            labels=[0, 1, 2, 3],
-            right=False,
-        ).astype(int)
-        sk_pdf = sk_pdf.dropna(subset=["ArrDelayBucket"])
+    # Vaciar colas y eliminar conexiones
+    r = requests.get(f"{NIFI_URL}/process-groups/{pg_id}/connections", headers=HDR)
+    if r.ok:
+        for conn in r.json().get("connections", []):
+            conn_id = conn["id"]
+            requests.post(f"{NIFI_URL}/flowfile-queues/{conn_id}/drop-requests", headers=HDR)
+            time.sleep(0.3)
+            requests.delete(
+                f"{NIFI_URL}/connections/{conn_id}?version={conn['revision']['version']}",
+                headers=HDR,
+            )
+    time.sleep(1)
 
-        sk_pre = _ColumnTransformer([
-            ("cat", _OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1), sk_cat),
-            ("num", "passthrough", sk_num),
-        ])
-        sk_pipe = _Pipeline([
-            ("preprocessor", sk_pre),
-            ("classifier",   _SkRFC(n_estimators=100, max_depth=15, random_state=42, n_jobs=-1)),
-        ])
-        sk_pipe.fit(sk_pdf[sk_cat + sk_num], sk_pdf["ArrDelayBucket"])
+    # Eliminar procesadores
+    for proc in processors:
+        r_get = requests.get(f"{NIFI_URL}/processors/{proc['id']}", headers=HDR)
+        if r_get.ok:
+            version = r_get.json()["revision"]["version"]
+            requests.delete(
+                f"{NIFI_URL}/processors/{proc['id']}?version={version}", headers=HDR
+            )
 
-        sk_buf = _io.BytesIO()
-        _joblib.dump(sk_pipe, sk_buf)
-        sk_buf.seek(0)
-        sk_s3 = _boto3.client(
-            "s3",
-            endpoint_url=MINIO_ENDPOINT,
-            aws_access_key_id=MINIO_ACCESS,
-            aws_secret_access_key=MINIO_SECRET,
-        )
-        sk_s3.put_object(Bucket="models", Key="sklearn_flight_model.joblib", Body=sk_buf.getvalue())
-        print("sklearn model guardado en MinIO: models/sklearn_flight_model.joblib")
-    except Exception as sk_err:
-        print("WARN: sklearn training failed: {}".format(sk_err))
+    print("  Flow existente eliminado.")
 
 
-# MLflow tracking ya integrado arriba
+def create_processor(pg_id, proc_type, name, properties, position,
+                     auto_terminate=None, concurrent_tasks=1):
+    body = {
+        "revision": {"version": 0},
+        "component": {
+            "type": proc_type,
+            "name": name,
+            "position": {"x": position[0], "y": position[1]},
+            "config": {
+                "properties": properties,
+                "schedulingStrategy": "TIMER_DRIVEN",
+                "schedulingPeriod": "1 sec",
+                "concurrentlySchedulableTaskCount": concurrent_tasks,
+                "autoTerminatedRelationships": auto_terminate or [],
+            },
+        },
+    }
+    r = requests.post(
+        f"{NIFI_URL}/process-groups/{pg_id}/processors", headers=HDR, json=body
+    )
+    if not r.ok:
+        print(f"  ERROR creando {name}: {r.status_code} {r.text[:300]}")
+        r.raise_for_status()
+    proc = r.json()
+    print(f"  Procesador creado: {name}  id={proc['id']}")
+    return proc
+
+
+def create_connection(pg_id, src_id, dst_id, relationships):
+    body = {
+        "revision": {"version": 0},
+        "component": {
+            "source": {"id": src_id, "groupId": pg_id, "type": "PROCESSOR"},
+            "destination": {"id": dst_id, "groupId": pg_id, "type": "PROCESSOR"},
+            "selectedRelationships": relationships,
+            "backPressureDataSizeThreshold": "1 GB",
+            "backPressureObjectThreshold": 10000,
+            "flowFileExpiration": "0 sec",
+        },
+    }
+    r = requests.post(
+        f"{NIFI_URL}/process-groups/{pg_id}/connections", headers=HDR, json=body
+    )
+    if not r.ok:
+        print(f"  ERROR creando conexión {relationships}: {r.status_code} {r.text[:300]}")
+        r.raise_for_status()
+    print(f"  Conexión creada: {relationships}")
+    return r.json()
+
+
+def get_processor_state(proc_id):
+    r = requests.get(f"{NIFI_URL}/processors/{proc_id}", headers=HDR)
+    r.raise_for_status()
+    data = r.json()
+    return data["revision"]["version"], data["component"].get("validationErrors", [])
+
+
+def start_processor(proc_id):
+    version, errors = get_processor_state(proc_id)
+    if errors:
+        print(f"  ADVERTENCIA validación {proc_id}: {errors}")
+    body = {
+        "revision": {"version": version},
+        "state": "RUNNING",
+        "disconnectedNodeAcknowledged": False,
+    }
+    r = requests.put(
+        f"{NIFI_URL}/processors/{proc_id}/run-status", headers=HDR, json=body
+    )
+    if not r.ok:
+        print(f"  ERROR iniciando {proc_id}: {r.status_code} {r.text[:300]}")
+        r.raise_for_status()
+    print(f"  Procesador iniciado: {proc_id}")
+
+
+def main():
+    print("=== Configurando flujo NiFi: MinIO → Cassandra (BATCH) ===\n")
+    print(f"Fuente: {MINIO_URL}")
+    print(f"Batch size: {BATCH_SIZE} registros por INSERT BATCH\n")
+
+    wait_for_nifi()
+    pg_id = get_root_pg_id()
+    print(f"Root Process Group: {pg_id}\n")
+
+    cleanup_existing_flow(pg_id)
+
+    print("Creando procesadores...")
+
+    # 1. GenerateFlowFile — dispara el flujo cada hora
+    generate = create_processor(
+        pg_id,
+        "org.apache.nifi.processors.standard.GenerateFlowFile",
+        "GenerateFlowFile - disparador",
+        {
+            "File Size": "0 B",
+            "Batch Size": "1",
+            "Data Format": "Text",
+            "Unique FlowFiles": "false",
+        },
+        position=(0, 0),
+    )
+
+    # 2. InvokeHTTP — descarga el fichero desde MinIO (Data Lakehouse)
+    invoke_http = create_processor(
+        pg_id,
+        "org.apache.nifi.processors.standard.InvokeHTTP",
+        "InvokeHTTP - descargar desde MinIO",
+        {
+            "HTTP Method": "GET",
+            "Remote URL": MINIO_URL,
+            "Connection Timeout": "10 secs",
+            "Read Timeout": "30 secs",
+        },
+        position=(300, 0),
+        auto_terminate=["Original", "Retry", "No Retry", "Failure"],
+    )
+
+    # 3. SplitText — una línea JSON por FlowFile
+    split_text = create_processor(
+        pg_id,
+        "org.apache.nifi.processors.standard.SplitText",
+        "SplitText - una línea por registro",
+        {
+            "Line Split Count": "1",
+            "Header Line Count": "0",
+            "Remove Trailing Newlines": "true",
+        },
+        position=(600, 0),
+        auto_terminate=["original", "failure"],
+    )
+
+    # 4. EvaluateJsonPath — extrae Origin, Dest, Distance como atributos
+    evaluate_json = create_processor(
+        pg_id,
+        "org.apache.nifi.processors.standard.EvaluateJsonPath",
+        "EvaluateJsonPath - extraer campos",
+        {
+            "Destination": "flowfile-attribute",
+            "Return Type": "scalar",
+            "origin": "$.Origin",
+            "dest": "$.Dest",
+            "distance": "$.Distance",
+        },
+        position=(900, 0),
+        auto_terminate=["failure", "unmatched"],
+    )
+
+    # 5. ReplaceText — genera el CQL INSERT con punto y coma + salto de línea.
+    # El \n al final permite que MergeContent concatene sin demarcador adicional.
+    cql = (
+        "INSERT INTO origin_dest_distances(origin, dest, distance) "
+        "VALUES ('${origin}', '${dest}', ${distance});\n"
+    )
+    replace_text = create_processor(
+        pg_id,
+        "org.apache.nifi.processors.standard.ReplaceText",
+        "ReplaceText - generar CQL INSERT",
+        {
+            "Replacement Value": cql,
+            "Replacement Strategy": "Always Replace",
+            "Evaluation Mode": "Entire text",
+            "Character Set": "UTF-8",
+        },
+        position=(1200, 0),
+        auto_terminate=["failure"],
+    )
+
+    # 6. MergeContent — agrupa BATCH_SIZE FlowFiles en un solo FlowFile
+    # Cada FlowFile fusionado contiene BATCH_SIZE sentencias INSERT.
+    # Cada INSERT ya termina en ";\n" (via ReplaceText anterior), así que
+    # no necesitamos demarcador adicional — usamos "Do Not Use Delimiters".
+    merge_content = create_processor(
+        pg_id,
+        "org.apache.nifi.processors.standard.MergeContent",
+        f"MergeContent - agrupar {BATCH_SIZE} registros",
+        {
+            "Merge Strategy": "Bin-Packing Algorithm",
+            "Merge Format": "Binary Concatenation",
+            "Minimum Number of Entries": str(BATCH_SIZE),
+            "Maximum Number of Entries": str(BATCH_SIZE),
+            "Max Bin Age": "30 sec",
+            "Delimiter Strategy": "Do Not Use Delimiters",
+        },
+        position=(1500, 0),
+        auto_terminate=["failure", "original"],
+    )
+
+    # 7. ReplaceText — añade "BEGIN BATCH\n" al inicio
+    prepend_batch = create_processor(
+        pg_id,
+        "org.apache.nifi.processors.standard.ReplaceText",
+        "ReplaceText - BEGIN BATCH",
+        {
+            "Replacement Value": "BEGIN BATCH\n",
+            "Replacement Strategy": "Prepend",
+            "Evaluation Mode": "Entire text",
+            "Character Set": "UTF-8",
+        },
+        position=(1800, 0),
+        auto_terminate=["failure"],
+    )
+
+    # 8. ReplaceText — añade "\nAPPLY BATCH;" al final
+    append_batch = create_processor(
+        pg_id,
+        "org.apache.nifi.processors.standard.ReplaceText",
+        "ReplaceText - APPLY BATCH",
+        {
+            "Replacement Value": "\nAPPLY BATCH;",
+            "Replacement Strategy": "Append",
+            "Evaluation Mode": "Entire text",
+            "Character Set": "UTF-8",
+        },
+        position=(2100, 0),
+        auto_terminate=["failure"],
+    )
+
+    # 9. PutCassandraQL — ejecuta el BATCH completo (4 tareas concurrentes)
+    put_cassandra = create_processor(
+        pg_id,
+        "org.apache.nifi.processors.cassandra.PutCassandraQL",
+        "PutCassandraQL - insertar BATCH en Cassandra",
+        {
+            "Cassandra Contact Points": "cassandra:9042",
+            "Keyspace": "flight_data",
+        },
+        position=(2400, 0),
+        auto_terminate=["success", "failure", "retry"],
+        concurrent_tasks=4,
+    )
+
+    print("\nCreando conexiones...")
+    create_connection(pg_id, generate["id"],      invoke_http["id"],   ["success"])
+    create_connection(pg_id, invoke_http["id"],   split_text["id"],    ["Response"])
+    create_connection(pg_id, split_text["id"],    evaluate_json["id"], ["splits"])
+    create_connection(pg_id, evaluate_json["id"], replace_text["id"],  ["matched"])
+    create_connection(pg_id, replace_text["id"],  merge_content["id"], ["success"])
+    create_connection(pg_id, merge_content["id"], prepend_batch["id"], ["merged"])
+    create_connection(pg_id, prepend_batch["id"], append_batch["id"],  ["success"])
+    create_connection(pg_id, append_batch["id"],  put_cassandra["id"], ["success"])
+
+    # Actualizar GenerateFlowFile a scheduling de 1 hora
+    version, _ = get_processor_state(generate["id"])
+    r = requests.put(
+        f"{NIFI_URL}/processors/{generate['id']}",
+        headers=HDR,
+        json={
+            "revision": {"version": version},
+            "component": {
+                "id": generate["id"],
+                "config": {
+                    "schedulingPeriod": "3600 sec",
+                    "schedulingStrategy": "TIMER_DRIVEN",
+                },
+            },
+        },
+    )
+    if r.ok:
+        print("  GenerateFlowFile scheduling actualizado a 3600 sec (1 hora)")
+
+    print("\nArrancando procesadores...")
+    time.sleep(2)
+    start_processor(put_cassandra["id"])
+    start_processor(append_batch["id"])
+    start_processor(prepend_batch["id"])
+    start_processor(merge_content["id"])
+    start_processor(replace_text["id"])
+    start_processor(evaluate_json["id"])
+    start_processor(split_text["id"])
+    start_processor(invoke_http["id"])
+    start_processor(generate["id"])
+
+    print(f"\n=== Flujo NiFi activo (BATCH mode: {BATCH_SIZE} registros/BATCH) ===")
+    print(f"    Fuente: {MINIO_URL}")
+    print(f"    ~4700 registros → ~{4700 // BATCH_SIZE} BATCHes → Cassandra")
+
+
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else ".")
+    main()

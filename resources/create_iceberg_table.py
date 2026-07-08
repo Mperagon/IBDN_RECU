@@ -1,78 +1,109 @@
-"""
-Convierte los datos de entrenamiento (JSONL) a tabla Iceberg almacenada en MinIO.
-Ejecutar UNA sola vez con:
-  spark-submit --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262 create_iceberg_table.py
-"""
-import sys, os
-from pyspark.sql import SparkSession
-from pyspark.sql.types import *
+import os
+import json
+import logging
 
-MINIO_ENDPOINT = "http://minio:9000"
-MINIO_ACCESS   = "minioadmin"
-MINIO_SECRET   = "minioadmin"
-# En K8s (client mode) hay que fijar la IP del pod para que los executors
-# puedan conectar de vuelta al driver. En Docker Compose y cluster mode
-# Spark lo detecta solo.
-_driver_host = os.environ.get("SPARK_DRIVER_HOST")
-_builder = SparkSession.builder \
-    .appName("CreateIcebergTable") \
-    .master("spark://spark-master:7077")
-if _driver_host:
-    _builder = _builder \
-        .config("spark.driver.host", _driver_host) \
-        .config("spark.driver.bindAddress", "0.0.0.0")
-spark = _builder \
-    .config("spark.sql.extensions",
-            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions") \
-    .config("spark.sql.catalog.minio_catalog",
-            "org.apache.iceberg.spark.SparkCatalog") \
-    .config("spark.sql.catalog.minio_catalog.type", "hadoop") \
-    .config("spark.sql.catalog.minio_catalog.warehouse",
-            "s3a://flight-data/iceberg") \
-    .config("spark.hadoop.fs.s3a.endpoint",        MINIO_ENDPOINT) \
-    .config("spark.hadoop.fs.s3a.access.key",      MINIO_ACCESS) \
-    .config("spark.hadoop.fs.s3a.secret.key",      MINIO_SECRET) \
-    .config("spark.hadoop.fs.s3a.path.style.access", "true") \
-    .config("spark.hadoop.fs.s3a.impl",
-            "org.apache.hadoop.fs.s3a.S3AFileSystem") \
-    .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false") \
-    .getOrCreate()
+KAFKA_BROKER  = os.environ.get("KAFKA_BROKER",        "kafka:9092")
+MLFLOW_URI    = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+MODEL_NAME    = "sklearn_flight_model"
+MODEL_STAGE   = "Production"
 
-spark.sparkContext.setLogLevel("WARN")
+from pyflink.datastream import StreamExecutionEnvironment
+from pyflink.datastream.connectors.kafka import (
+    KafkaSource, KafkaSink, KafkaRecordSerializationSchema, KafkaOffsetsInitializer,
+    DeliveryGuarantee,
+)
+from pyflink.common import WatermarkStrategy, Types
+from pyflink.common.serialization import SimpleStringSchema
+from pyflink.datastream.functions import MapFunction
 
-schema = StructType([
-    StructField("ArrDelay",   DoubleType(),    True),
-    StructField("CRSArrTime", TimestampType(), True),
-    StructField("CRSDepTime", TimestampType(), True),
-    StructField("Carrier",    StringType(),    True),
-    StructField("DayOfMonth", IntegerType(),   True),
-    StructField("DayOfWeek",  IntegerType(),   True),
-    StructField("DayOfYear",  IntegerType(),   True),
-    StructField("DepDelay",   DoubleType(),    True),
-    StructField("Dest",       StringType(),    True),
-    StructField("Distance",   DoubleType(),    True),
-    StructField("FlightDate", DateType(),      True),
-    StructField("FlightNum",  StringType(),    True),
-    StructField("Origin",     StringType(),    True),
-])
 
-print("Leyendo datos desde MinIO...")
-input_path = "s3a://flight-data/raw/simple_flight_delay_features.jsonl.bz2"
-df = spark.read.json(input_path, schema=schema)
-count = df.count()
-print(f"Filas leidas: {count}")
+class FlightPredictFunction(MapFunction):
+    """Carga el modelo sklearn desde MLflow Model Registry y predice retrasos."""
 
-print("Escribiendo tabla Iceberg en MinIO...")
-df.writeTo("minio_catalog.flight_features") \
-  .tableProperty("write.format.default", "parquet") \
-  .createOrReplace()
+    def __init__(self):
+        self._model = None
 
-print("Verificando tabla Iceberg...")
-result = spark.sql("SELECT COUNT(*) as total FROM minio_catalog.flight_features")
-result.show()
+    def open(self, runtime_context):
+        import mlflow.sklearn
+        mlflow.set_tracking_uri(MLFLOW_URI)
+        self._model = mlflow.sklearn.load_model("models:/{}/{}".format(MODEL_NAME, MODEL_STAGE))
+        logging.info("Modelo sklearn cargado desde MLflow registry (%s/%s)", MODEL_NAME, MODEL_STAGE)
 
-spark.sql("SELECT Carrier, Origin, Dest, DepDelay, ArrDelay FROM minio_catalog.flight_features LIMIT 5").show()
+    def map(self, message):
+        import pandas as pd
+        try:
+            data = json.loads(message)
+            route = "{}-{}".format(data.get("Origin", ""), data.get("Dest", ""))
+            row = pd.DataFrame([{
+                "Carrier":    str(data.get("Carrier", "")),
+                "Origin":     str(data.get("Origin", "")),
+                "Dest":       str(data.get("Dest", "")),
+                "Route":      route,
+                "DepDelay":   float(data.get("DepDelay",   0) or 0),
+                "Distance":   float(data.get("Distance",   0) or 0),
+                "DayOfMonth": int(data.get("DayOfMonth",   1) or 1),
+                "DayOfWeek":  int(data.get("DayOfWeek",    1) or 1),
+                "DayOfYear":  int(data.get("DayOfYear",    1) or 1),
+            }])
+            prediction = float(self._model.predict(row)[0])
+            result = {
+                "UUID":       data.get("UUID", ""),
+                "Prediction": prediction,
+                "Origin":     data.get("Origin", ""),
+                "Dest":       data.get("Dest", ""),
+                "Carrier":    data.get("Carrier", ""),
+                "DepDelay":   float(data.get("DepDelay", 0) or 0),
+                "Timestamp":  data.get("Timestamp", ""),
+            }
+            return json.dumps(result)
+        except Exception as exc:
+            logging.error("Error en prediccion: %s", exc)
+            return None
 
-print(f"\nOK - Tabla Iceberg creada en s3a://flight-data/iceberg/flight_features")
-print(f"     {count} filas almacenadas en formato Parquet/Iceberg")
-spark.stop()
+
+def main():
+    env = StreamExecutionEnvironment.get_execution_environment()
+    env.set_parallelism(2)
+    env.enable_checkpointing(10000)
+
+    kafka_source = (
+        KafkaSource.builder()
+        .set_bootstrap_servers(KAFKA_BROKER)
+        .set_topics("flight-delay-ml-request")
+        .set_group_id("flink-flight-predictor")
+        .set_starting_offsets(KafkaOffsetsInitializer.latest())
+        .set_value_only_deserializer(SimpleStringSchema())
+        .build()
+    )
+
+    stream = env.from_source(
+        kafka_source,
+        WatermarkStrategy.no_watermarks(),
+        "Kafka Source - flight-delay-ml-request",
+    )
+
+    predictions = (
+        stream
+        .map(FlightPredictFunction(), output_type=Types.STRING())
+        .filter(lambda x: x is not None)
+    )
+
+    kafka_sink = (
+        KafkaSink.builder()
+        .set_bootstrap_servers(KAFKA_BROKER)
+        .set_delivery_guarantee(DeliveryGuarantee.AT_LEAST_ONCE)
+        .set_record_serializer(
+            KafkaRecordSerializationSchema.builder()
+            .set_topic("flight-predictions")
+            .set_value_serialization_schema(SimpleStringSchema())
+            .build()
+        )
+        .build()
+    )
+
+    predictions.sink_to(kafka_sink)
+    env.execute("Flight Delay Prediction - Flink")
+
+
+if __name__ == "__main__":
+    main()

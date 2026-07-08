@@ -10,4 +10,15 @@ RUN cd /opt/spark/jars && \
     wget -q "https://repo1.maven.org/maven2/org/apache/spark/spark-token-provider-kafka-0-10_2.12/3.5.3/spark-token-provider-kafka-0-10_2.12-3.5.3.jar" && \
     wget -q "https://repo1.maven.org/maven2/org/apache/commons/commons-pool2/2.11.1/commons-pool2-2.11.1.jar" && \
     wget -q "https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-client-api/3.3.4/hadoop-client-api-3.3.4.jar" && \
-    wget -q "https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-client-runtime/3.3.4/hadoop-client-runtime-3.3.4.jar"
+    wget -q "https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-client-runtime/3.3.4/hadoop-client-runtime-3.3.4.jar" && \
+    wget -q "https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.6.1/iceberg-spark-runtime-3.5_2.12-1.6.1.jar"
+
+# Dependencias Python para el pod driver en Spark on K8s (--deploy-mode cluster).
+# El driver corre en este contenedor y necesita mlflow/sklearn para el entrenamiento.
+# Los executor pods usan apache/spark:3.5.3 estándar (solo JVM, sin Python deps).
+RUN pip install --no-cache-dir \
+    mlflow \
+    scikit-learn \
+    pandas \
+    numpy \
+    boto3
